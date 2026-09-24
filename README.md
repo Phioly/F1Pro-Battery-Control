@@ -11,7 +11,7 @@ SteamOS（Decky Loader）下的 OneXFly F1 Pro / HX 370 掌机 EC 控制插件�
 > **旧名 `F1 Pro Battery Control` 已改名。** Decky 会把新旧两份当成两个不同的插件，
 > 升级时请先按文末「从旧版本升级」一节卸载旧插件。
 
-**当前版本**：`v0.6.13` · **适用**：SteamOS + Decky Loader · **不涉及** TDP / CPU 调度（可与 SimpleDeckyTDP 共存）
+**当前版本**：`v0.6.14` · **适用**：SteamOS + Decky Loader · **不涉及** TDP / CPU 调度（可与 SimpleDeckyTDP 共存）
 
 **界面语言**：跟随 Steam 客户端 —— 简体 / 繁体中文显示中文，其余语言一律英文。
 
@@ -105,7 +105,7 @@ ABI 对 `inhibit-charge-awake` 只界定了"唤醒时禁止"，**并没有承诺
 
 ### 方式一：Decky 从 ZIP 安装（推荐）
 
-1. 把 `F1ProECControl-v0.6.13.zip` 传到掌机。
+1. 把 `F1ProECControl-v0.6.14.zip` 传到掌机。
 2. 打开 Decky → 设置（齿轮）→ **开发者** → 打开「Developer Mode」。
 3. 在该页面选择 **Install Plugin from ZIP**（或把 zip 的本地路径粘贴到 "Install from URL"），选中 zip。
 4. 回到 QAM，插件列表中会出现 **F1Pro EC Control**。

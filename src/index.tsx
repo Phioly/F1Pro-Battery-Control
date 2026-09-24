@@ -41,9 +41,20 @@ interface BatteryState {
   auto_restore: boolean;
   saved_threshold: number | null;
   saved_mode: string | null;
-  restore_report: string[];
+  /**
+   * 启动恢复报告。**结构化条目**（键 + 原始参数），不是渲染好的文案 ——
+   * 后端生成它时前端还没把语言推过去（`_main` 早于 `set_locale`），
+   * 若那时就渲染，中文界面下会一直显示默认英文。
+   */
+  restore_report: RestoreReportItem[];
   presets: number[];
   threshold_disabled_value: number;
+}
+
+/** 恢复报告的一条：文案键 + 原始参数（`mode` 传模式名，不是本地化标签）。 */
+interface RestoreReportItem {
+  key: string;
+  params?: Record<string, string | number>;
 }
 
 interface Result {
@@ -255,6 +266,38 @@ const FAN_MODE_LABEL_KEYS: Record<string, MessageKey> = {
   performance: "fan.mode.performance",
   custom: "fan.mode.custom",
 };
+
+/**
+ * 渲染后端的启动恢复报告。
+ *
+ * 后端只给**结构化条目**（`{key, params}`），不给自己渲染好的文案 —— 因为
+ * 它生成报告时（`_main`）界面语言还没被前端推过去（`set_locale` 发生在插件
+ * 加载之后），那时渲染会把整行钉死在默认英文上，中文界面重开插件也不会变。
+ *
+ * `params.mode` 传的是**模式名**（`balanced` / `inhibit-charge`），这里查表
+ * 翻译成当前语言；`params.area_key` 同理（`err.restoreFailed` 的环节名）。
+ * 两条查表路径分别覆盖风扇与充电两套模式键。
+ */
+const renderRestoreReport = (
+  items: RestoreReportItem[] | undefined,
+  t: (key: MessageKey, values?: Record<string, string | number>) => string,
+): string[] =>
+  (items ?? []).map((item) => {
+    const params: Record<string, string | number> = { ...(item.params ?? {}) };
+    if (typeof params.mode === "string") {
+      const mode = params.mode;
+      // 先查风扇表（`balanced` 等），再查充电表（`inhibit-charge` 等）。
+      const modeKey = FAN_MODE_LABEL_KEYS[mode] ?? MODE_LABEL_KEYS[mode];
+      params.mode = modeKey === undefined ? mode : t(modeKey);
+    }
+    if (typeof params.area_key === "string") {
+      params.area = t(params.area_key as MessageKey);
+      delete params.area_key;
+    }
+    // 键是后端给的白名单字符串（`restore.*` / `err.*`），断言成 MessageKey
+    // 让 TS 放行；真有漏译时 `createTranslator` 会原样吐回键名，界面上一眼可见。
+    return t(item.key as MessageKey, params);
+  });
 
 /**
  * 主页面上按顺序列出的风扇模式按钮。
@@ -1188,7 +1231,9 @@ function Content() {
         {state?.restore_report && state.restore_report.length > 0 && (
           <PanelSectionRow>
             <div style={{ whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }}>
-              {state.restore_report.join(t("diag.reportSeparator"))}
+              {renderRestoreReport(state.restore_report, t).join(
+                t("diag.reportSeparator"),
+              )}
             </div>
           </PanelSectionRow>
         )}

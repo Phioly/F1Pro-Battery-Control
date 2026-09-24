@@ -110,6 +110,29 @@ export const MESSAGE_KEYS = [
   "error.curveNotIncreasing",
   "error.saveCurve",
   "error.curveSavedSwitchFailed",
+  // ---- 启动恢复报告（后端给键 + 原始参数，由前端渲染）----
+  // 这些键必须与后端 `_MSG` 里同名的条目文案一致：后端在 `_main()` 生成报告时
+  // 界面语言还没被推过来，所以它只产出 `{key, params}`，文案取哪份由前端决定。
+  "restore.fanEcAuto",
+  "restore.fanHandoverUnconfirmed",
+  "restore.fanModeRestored",
+  "restore.fanManualUnconfirmed",
+  "restore.autoOff",
+  "restore.batteryMissing",
+  "restore.noThresholdNode",
+  "restore.thresholdRestored",
+  "restore.thresholdUnconfirmed",
+  "restore.noBehaviourNode",
+  "restore.modeUnsupported",
+  "restore.modeRestored",
+  "restore.modeUnconfirmed",
+  "restore.nothing",
+  "err.batteryProbe",
+  "err.restoreFailed",
+  // 恢复失败时指明是哪个环节（`err.restoreFailed` 的 `{area}`）
+  "common.chargeMode",
+  "common.chargeLimit",
+  "common.fanControl",
 ] as const;
 
 export type MessageKey = (typeof MESSAGE_KEYS)[number];

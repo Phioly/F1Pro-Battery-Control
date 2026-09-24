@@ -144,6 +144,27 @@ const zhCN = {
     "error.curveNotIncreasing": "曲线节点的温度必须严格递增（每个节点都要比前一个更高）",
     "error.saveCurve": "保存自定义曲线失败",
     "error.curveSavedSwitchFailed": "曲线已保存，但切换为自定义模式失败，尚未在风扇上生效",
+    // ---- 启动恢复报告（与后端 `_MSG["zh"]` 里同名键保持一致）----
+    // `{mode}` 由前端查 fan.mode.* / charge.mode.* 翻译成当前语言后填入。
+    "restore.fanEcAuto": "风扇已确认处于 EC 自动控制",
+    "restore.fanHandoverUnconfirmed": "风扇交还 EC 后未确认生效",
+    "restore.fanModeRestored": "风扇模式已恢复为「{mode}」",
+    "restore.fanManualUnconfirmed": "风扇切换为手动控制后未确认生效（目标「{mode}」）",
+    "restore.autoOff": "启动自动恢复已关闭",
+    "restore.batteryMissing": "未找到电池节点：{exc}",
+    "restore.noThresholdNode": "内核无 charge_control_end_threshold，跳过上限恢复",
+    "restore.thresholdRestored": "充电上限已恢复为 {value}%",
+    "restore.thresholdUnconfirmed": "充电上限恢复后未确认生效（目标 {value}%）",
+    "restore.noBehaviourNode": "内核无 charge_behaviour，跳过模式恢复",
+    "restore.modeUnsupported": "内核不支持「{mode}」，模式未恢复",
+    "restore.modeRestored": "充电模式已恢复为「{mode}」",
+    "restore.modeUnconfirmed": "充电模式恢复后未确认生效（目标「{mode}」）",
+    "restore.nothing": "没有需要恢复的设置",
+    "err.batteryProbe": "未找到支持充电控制的电池节点",
+    "err.restoreFailed": "{area}恢复失败：{detail}",
+    "common.chargeMode": "充电模式",
+    "common.chargeLimit": "充电上限",
+    "common.fanControl": "风扇控制",
 };
 
 const enUS = {
@@ -242,6 +263,26 @@ const enUS = {
     "error.curveNotIncreasing": "Curve temperatures must strictly increase (each point higher than the previous one)",
     "error.saveCurve": "Failed to save custom curve",
     "error.curveSavedSwitchFailed": "Curve saved, but switching to Custom mode failed — not yet active on the fan",
+    // ---- Startup restore report (mirrors the same keys in the backend table) ----
+    "restore.fanEcAuto": "Fan confirmed under EC auto control",
+    "restore.fanHandoverUnconfirmed": "Fan handover to the EC could not be confirmed",
+    "restore.fanModeRestored": 'Fan mode restored to "{mode}"',
+    "restore.fanManualUnconfirmed": 'Fan switch to manual control could not be confirmed (target "{mode}")',
+    "restore.autoOff": "Auto restore on startup is off",
+    "restore.batteryMissing": "Battery node not found: {exc}",
+    "restore.noThresholdNode": "Kernel has no charge_control_end_threshold; skipping limit restore",
+    "restore.thresholdRestored": "Charge limit restored to {value}%",
+    "restore.thresholdUnconfirmed": "Charge limit restore could not be confirmed (target {value}%)",
+    "restore.noBehaviourNode": "Kernel has no charge_behaviour; skipping mode restore",
+    "restore.modeUnsupported": 'Kernel does not support "{mode}"; mode not restored',
+    "restore.modeRestored": 'Charge mode restored to "{mode}"',
+    "restore.modeUnconfirmed": 'Charge mode restore could not be confirmed (target "{mode}")',
+    "restore.nothing": "Nothing to restore",
+    "err.batteryProbe": "No battery node supporting charge control was found",
+    "err.restoreFailed": "{area} restore failed: {detail}",
+    "common.chargeMode": "Charge mode",
+    "common.chargeLimit": "Charge limit",
+    "common.fanControl": "Fan control",
 };
 
 /**
@@ -441,6 +482,33 @@ const FAN_MODE_LABEL_KEYS = {
     performance: "fan.mode.performance",
     custom: "fan.mode.custom",
 };
+/**
+ * 渲染后端的启动恢复报告。
+ *
+ * 后端只给**结构化条目**（`{key, params}`），不给自己渲染好的文案 —— 因为
+ * 它生成报告时（`_main`）界面语言还没被前端推过去（`set_locale` 发生在插件
+ * 加载之后），那时渲染会把整行钉死在默认英文上，中文界面重开插件也不会变。
+ *
+ * `params.mode` 传的是**模式名**（`balanced` / `inhibit-charge`），这里查表
+ * 翻译成当前语言；`params.area_key` 同理（`err.restoreFailed` 的环节名）。
+ * 两条查表路径分别覆盖风扇与充电两套模式键。
+ */
+const renderRestoreReport = (items, t) => (items ?? []).map((item) => {
+    const params = { ...(item.params ?? {}) };
+    if (typeof params.mode === "string") {
+        const mode = params.mode;
+        // 先查风扇表（`balanced` 等），再查充电表（`inhibit-charge` 等）。
+        const modeKey = FAN_MODE_LABEL_KEYS[mode] ?? MODE_LABEL_KEYS[mode];
+        params.mode = modeKey === undefined ? mode : t(modeKey);
+    }
+    if (typeof params.area_key === "string") {
+        params.area = t(params.area_key);
+        delete params.area_key;
+    }
+    // 键是后端给的白名单字符串（`restore.*` / `err.*`），断言成 MessageKey
+    // 让 TS 放行；真有漏译时 `createTranslator` 会原样吐回键名，界面上一眼可见。
+    return t(item.key, params);
+});
 /**
  * 主页面上按顺序列出的风扇模式按钮。
  *
@@ -1055,7 +1123,7 @@ function Content() {
                                     ? t("battery.checked", { label: fanModeLabel(mode) })
                                     : fanModeLabel(mode) }) }, mode))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setView("fan"), children: t("fan.editCurve") }) })] })) : (
                 // 不可用时**只留一行原因**，不要摆一排点了没反应的按钮。
-                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { ...blockStyle, opacity: 0.8 }, children: fan?.reason ?? fanError ?? t("fan.unavailableDefault") }) })) }), SP_JSX.jsxs(DFL.PanelSection, { title: t("settings.section"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: t("settings.autoRestore"), description: t("settings.autoRestoreDesc"), checked: state?.auto_restore ?? true, disabled: busy, onChange: changeAutoRestore }) }), state?.restore_report && state.restore_report.length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: state.restore_report.join(t("diag.reportSeparator")) }) }))] }), error && (SP_JSX.jsx(DFL.PanelSection, { title: t("common.hint"), children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: t("common.diagnostic"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
+                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { ...blockStyle, opacity: 0.8 }, children: fan?.reason ?? fanError ?? t("fan.unavailableDefault") }) })) }), SP_JSX.jsxs(DFL.PanelSection, { title: t("settings.section"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: t("settings.autoRestore"), description: t("settings.autoRestoreDesc"), checked: state?.auto_restore ?? true, disabled: busy, onChange: changeAutoRestore }) }), state?.restore_report && state.restore_report.length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: renderRestoreReport(state.restore_report, t).join(t("diag.reportSeparator")) }) }))] }), error && (SP_JSX.jsx(DFL.PanelSection, { title: t("common.hint"), children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: t("common.diagnostic"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
                                 whiteSpace: "normal",
                                 lineHeight: 1.35,
                                 fontFamily: "monospace",

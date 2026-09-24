@@ -111,4 +111,26 @@ export const zhCN: Record<MessageKey, string> = {
   "error.saveCurve": "保存自定义曲线失败",
   "error.curveSavedSwitchFailed":
     "曲线已保存，但切换为自定义模式失败，尚未在风扇上生效",
+
+  // ---- 启动恢复报告（与后端 `_MSG["zh"]` 里同名键保持一致）----
+  // `{mode}` 由前端查 fan.mode.* / charge.mode.* 翻译成当前语言后填入。
+  "restore.fanEcAuto": "风扇已确认处于 EC 自动控制",
+  "restore.fanHandoverUnconfirmed": "风扇交还 EC 后未确认生效",
+  "restore.fanModeRestored": "风扇模式已恢复为「{mode}」",
+  "restore.fanManualUnconfirmed": "风扇切换为手动控制后未确认生效（目标「{mode}」）",
+  "restore.autoOff": "启动自动恢复已关闭",
+  "restore.batteryMissing": "未找到电池节点：{exc}",
+  "restore.noThresholdNode": "内核无 charge_control_end_threshold，跳过上限恢复",
+  "restore.thresholdRestored": "充电上限已恢复为 {value}%",
+  "restore.thresholdUnconfirmed": "充电上限恢复后未确认生效（目标 {value}%）",
+  "restore.noBehaviourNode": "内核无 charge_behaviour，跳过模式恢复",
+  "restore.modeUnsupported": "内核不支持「{mode}」，模式未恢复",
+  "restore.modeRestored": "充电模式已恢复为「{mode}」",
+  "restore.modeUnconfirmed": "充电模式恢复后未确认生效（目标「{mode}」）",
+  "restore.nothing": "没有需要恢复的设置",
+  "err.batteryProbe": "未找到支持充电控制的电池节点",
+  "err.restoreFailed": "{area}恢复失败：{detail}",
+  "common.chargeMode": "充电模式",
+  "common.chargeLimit": "充电上限",
+  "common.fanControl": "风扇控制",
 };

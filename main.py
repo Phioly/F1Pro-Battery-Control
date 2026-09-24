@@ -228,17 +228,17 @@ class Plugin:
             # 启动恢复报告
             "restore.fanEcAuto": "风扇已确认处于 EC 自动控制",
             "restore.fanHandoverUnconfirmed": "风扇交还 EC 后未确认生效",
-            "restore.fanModeRestored": "风扇模式已恢复为「{label}」",
-            "restore.fanManualUnconfirmed": "风扇切换为手动控制后未确认生效（目标「{label}」）",
+            "restore.fanModeRestored": "风扇模式已恢复为「{mode}」",
+            "restore.fanManualUnconfirmed": "风扇切换为手动控制后未确认生效（目标「{mode}」）",
             "restore.autoOff": "启动自动恢复已关闭",
             "restore.batteryMissing": "未找到电池节点：{exc}",
             "restore.noThresholdNode": "内核无 charge_control_end_threshold，跳过上限恢复",
             "restore.thresholdRestored": "充电上限已恢复为 {value}%",
             "restore.thresholdUnconfirmed": "充电上限恢复后未确认生效（目标 {value}%）",
             "restore.noBehaviourNode": "内核无 charge_behaviour，跳过模式恢复",
-            "restore.modeUnsupported": "内核不支持「{label}」，模式未恢复",
-            "restore.modeRestored": "充电模式已恢复为「{label}」",
-            "restore.modeUnconfirmed": "充电模式恢复后未确认生效（目标「{label}」）",
+            "restore.modeUnsupported": "内核不支持「{mode}」，模式未恢复",
+            "restore.modeRestored": "充电模式已恢复为「{mode}」",
+            "restore.modeUnconfirmed": "充电模式恢复后未确认生效（目标「{mode}」）",
             "restore.nothing": "没有需要恢复的设置",
             # 电池探测
             "err.batteryProbe": "未找到支持充电控制的电池节点",
@@ -255,7 +255,7 @@ class Plugin:
             "common.chargeLimit": "充电上限",
             "common.fanControl": "风扇控制",
             "common.chargeControl": "电池控制",
-            "err.restoreFailed": "{area}恢复失败：{detail}",
+            "err.restoreFailed": "{area_key}恢复失败：{detail}",
         },
         "en": {
             # mode names
@@ -362,9 +362,9 @@ class Plugin:
             "restore.fanHandoverUnconfirmed": (
                 "Fan handover to the EC could not be confirmed"
             ),
-            "restore.fanModeRestored": "Fan mode restored to \"{label}\"",
+            "restore.fanModeRestored": "Fan mode restored to \"{mode}\"",
             "restore.fanManualUnconfirmed": (
-                "Fan switch to manual control could not be confirmed (target \"{label}\")"
+                "Fan switch to manual control could not be confirmed (target \"{mode}\")"
             ),
             "restore.autoOff": "Auto restore on startup is off",
             "restore.batteryMissing": "Battery node not found: {exc}",
@@ -376,10 +376,10 @@ class Plugin:
                 "Charge limit restore could not be confirmed (target {value}%)"
             ),
             "restore.noBehaviourNode": "Kernel has no charge_behaviour; skipping mode restore",
-            "restore.modeUnsupported": "Kernel does not support \"{label}\"; mode not restored",
-            "restore.modeRestored": "Charge mode restored to \"{label}\"",
+            "restore.modeUnsupported": "Kernel does not support \"{mode}\"; mode not restored",
+            "restore.modeRestored": "Charge mode restored to \"{mode}\"",
             "restore.modeUnconfirmed": (
-                "Charge mode restore could not be confirmed (target \"{label}\")"
+                "Charge mode restore could not be confirmed (target \"{mode}\")"
             ),
             "restore.nothing": "Nothing to restore",
             # battery probing
@@ -397,7 +397,7 @@ class Plugin:
             "common.chargeLimit": "Charge limit",
             "common.fanControl": "Fan control",
             "common.chargeControl": "Battery control",
-            "err.restoreFailed": "{area} restore failed: {detail}",
+            "err.restoreFailed": "{area_key} restore failed: {detail}",
         },
     }
 
@@ -1781,7 +1781,22 @@ class Plugin:
             return {"ok": False, "error": self._error_message(exc)}
 
     # -------------------------------------------------------------- 启动恢复
-    def _restore_fan_report(self, report: List[str]) -> None:
+    @staticmethod
+    def _report_entry(key: str, **params: Any) -> Dict[str, Any]:
+        """把一条恢复提示表示成**结构化**条目（键 + 原始参数），而不是成品文案。
+
+        为什么非要结构化（v0.6.14 修的真机缺陷）：启动恢复发生在 ``_main()``，
+        它**早于**前端把界面语言推给后端（``set_locale``）。若在这里就
+        ``self._t(...)`` 渲染，用的是默认 ``"en"`` —— 中文界面下
+        「设置 → Decky → 启动时自动恢复」那行提示恒为英文，而且**重开插件也不会变**
+        （报告只在启动时生成一次，之后直接复用 ``_restore_report``）。
+
+        参数一律传**原始值**（模式名 ``balanced``，而不是本地化过的
+        ``"均衡"`` / ``"Balanced"``），由前端按当前语言查表渲染。
+        """
+        return {"key": key, "params": dict(params)}
+
+    def _restore_fan_report(self, report: List[Dict[str, Any]]) -> None:
         """按保存的设置恢复风扇；不该接管时把控制权交还 EC。
 
         这里有个**安全兜底**：即使保存的模式是「自动」，也要检查 EC 当前是否被
@@ -1813,58 +1828,64 @@ class Plugin:
             # 分不清是真本来就自动、还是刚纠正了一个滞后读数，但两种情况
             # 的结论一样——现在确实处于 EC 自动控制，这不影响用户判断。
             if self._fan_handover_to_ec():
-                report.append(self._t("restore.fanEcAuto"))
+                report.append(self._report_entry("restore.fanEcAuto"))
             else:
-                report.append(self._t("restore.fanHandoverUnconfirmed"))
+                report.append(self._report_entry("restore.fanHandoverUnconfirmed"))
             return
 
-        label = self._fan_mode_label(saved)
         try:
             if self._fan_apply_manual(saved):
-                report.append(self._t("restore.fanModeRestored", label=label))
+                # 参数传**模式名**（前端查 fan.mode.* 翻译），不传本地化标签。
+                report.append(self._report_entry("restore.fanModeRestored", mode=saved))
             else:
                 # 注意这里是**已经写入了 pwm1_enable=1** 之后才失败的
                 # （_fan_apply_manual 先写 enable、再 _wait_for 确认）。
                 # 也就是 EC 已经在手动模式、而控制线程没起来——风扇挂在
                 # 一个不跟温度走、也没有 85°C 保护的手动 PWM 上。
                 # 所以必须兜底，不能只写一行日志。
-                report.append(self._t("restore.fanManualUnconfirmed", label=label))
+                report.append(
+                    self._report_entry("restore.fanManualUnconfirmed", mode=saved)
+                )
                 self._fan_fail_safe()
         except Exception as exc:  # noqa: BLE001
             report.append(
-                self._t(
+                self._report_entry(
                     "err.restoreFailed",
-                    area=self._t("common.fanControl"),
+                    area_key="common.fanControl",
                     detail=self._error_message(exc, self._t("common.fanControl")),
                 )
             )
             self._fan_fail_safe()
 
     def _restore_sync(self) -> None:
-        report: List[str] = []
+        report: List[Dict[str, Any]] = []
 
         # 风扇放在电池判断之前，且不受 auto_restore 影响（见方法文档里的安全兜底）。
         try:
             self._restore_fan_report(report)
         except Exception as exc:  # noqa: BLE001
             report.append(
-                self._t(
+                self._report_entry(
                     "err.restoreFailed",
-                    area=self._t("common.fanControl"),
+                    area_key="common.fanControl",
                     detail=self._error_message(exc, self._t("common.fanControl")),
                 )
             )
 
         settings = self._load_settings()
         if not settings.get("auto_restore", True):
-            report.append(self._t("restore.autoOff"))
+            report.append(self._report_entry("restore.autoOff"))
             self._restore_report = report
             return
 
         try:
             path = self._battery()
         except Exception as exc:  # noqa: BLE001
-            report.append(self._t("restore.batteryMissing", exc=exc))
+            # 注意 `exc` 是异常对象，不是字符串 —— 结构化条目里统一转成文本，
+            # 免得前端拿到没法渲染的对象（JSON 化时也会失败）。
+            report.append(
+                self._report_entry("restore.batteryMissing", exc=str(exc))
+            )
             self._restore_report = report
             return
 
@@ -1874,7 +1895,7 @@ class Plugin:
         ):
             node = os.path.join(path, self.THRESHOLD_FILE)
             if not self._node_exists(node):
-                report.append(self._t("restore.noThresholdNode"))
+                report.append(self._report_entry("restore.noThresholdNode"))
             else:
                 try:
                     self._write_node(node, str(saved_threshold))
@@ -1882,19 +1903,21 @@ class Plugin:
                         lambda: self._parse_int(self._read_or_none(node)) == saved_threshold
                     ):
                         report.append(
-                            self._t("restore.thresholdRestored", value=saved_threshold)
+                            self._report_entry(
+                                "restore.thresholdRestored", value=saved_threshold
+                            )
                         )
                     else:
                         report.append(
-                            self._t(
+                            self._report_entry(
                                 "restore.thresholdUnconfirmed", value=saved_threshold
                             )
                         )
                 except Exception as exc:  # noqa: BLE001
                     report.append(
-                        self._t(
+                        self._report_entry(
                             "err.restoreFailed",
-                            area=self._t("common.chargeLimit"),
+                            area_key="common.chargeLimit",
                             detail=self._error_message(exc),
                         )
                     )
@@ -1902,14 +1925,17 @@ class Plugin:
         saved_mode = settings.get("mode")
         if isinstance(saved_mode, str) and saved_mode in self.SELECTABLE_MODES:
             node = os.path.join(path, self.BEHAVIOUR_FILE)
-            label = self._mode_label(saved_mode)
             if not self._node_exists(node):
-                report.append(self._t("restore.noBehaviourNode"))
+                report.append(self._report_entry("restore.noBehaviourNode"))
             else:
                 try:
                     supported = self._parse_behaviours(self._read(node))["supported"]
                     if saved_mode not in supported:
-                        report.append(self._t("restore.modeUnsupported", label=label))
+                        report.append(
+                            self._report_entry(
+                                "restore.modeUnsupported", mode=saved_mode
+                            )
+                        )
                     else:
                         self._write_node(node, saved_mode)
                         if self._wait_for(
@@ -1917,23 +1943,27 @@ class Plugin:
                             == saved_mode
                         ):
                             report.append(
-                                self._t("restore.modeRestored", label=label)
+                                self._report_entry(
+                                    "restore.modeRestored", mode=saved_mode
+                                )
                             )
                         else:
                             report.append(
-                                self._t("restore.modeUnconfirmed", label=label)
+                                self._report_entry(
+                                    "restore.modeUnconfirmed", mode=saved_mode
+                                )
                             )
                 except Exception as exc:  # noqa: BLE001
                     report.append(
-                        self._t(
+                        self._report_entry(
                             "err.restoreFailed",
-                            area=self._t("common.chargeMode"),
+                            area_key="common.chargeMode",
                             detail=self._error_message(exc),
                         )
                     )
 
         if not report:
-            report.append(self._t("restore.nothing"))
+            report.append(self._report_entry("restore.nothing"))
         self._restore_report = report
 
     # ------------------------------------------------------------ Decky 生命周期
@@ -1947,7 +1977,7 @@ class Plugin:
 
         if not path:
             self.battery_path = None
-            self._restore_report = [self._t("err.batteryProbe")]
+            self._restore_report = [self._report_entry("err.batteryProbe")]
             decky.logger.warning("F1Pro EC Control: 未找到支持充电控制的电池节点")
             return
 

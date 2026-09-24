@@ -12,7 +12,7 @@ It covers two groups of features: **charge control** (bypass-power switch + char
 > names as two different plugins, so upgrade by removing the old one first — see
 > "Upgrading from an older version" at the end of this file.
 
-**Current version**: `v0.6.13` · **Requires**: SteamOS + Decky Loader · **Does not touch** TDP / CPU scheduling (coexists with SimpleDeckyTDP)
+**Current version**: `v0.6.14` · **Requires**: SteamOS + Decky Loader · **Does not touch** TDP / CPU scheduling (coexists with SimpleDeckyTDP)
 
 **UI language**: follows the Steam client — Simplified / Traditional Chinese show Chinese, every other language falls back to English.
 
@@ -109,7 +109,7 @@ The section "How the charge limit relates to each mode" below gives the register
 
 ### Option 1: install the ZIP from Decky (recommended)
 
-1. Copy `F1ProECControl-v0.6.13.zip` to the handheld.
+1. Copy `F1ProECControl-v0.6.14.zip` to the handheld.
 2. Open Decky → Settings (gear) → **Developer** → enable "Developer Mode".
 3. On that page pick **Install Plugin from ZIP** (or paste the local path of the zip into "Install from URL") and select the zip.
 4. Back in the QAM, **F1Pro EC Control** appears in the plugin list.

@@ -330,6 +330,49 @@ def isolated_settings(plugin, tmp: Path) -> Path:
     return Path(plugin._settings_path)
 
 
+def render_report(plugin, lang: str = "zh") -> List[str]:
+    """把 ``_restore_report``（结构化条目）渲染成**中文**人读文本。
+
+    后端从 v0.6.14 起不再在启动时渲染恢复报告（那时语言还没被前端推过来，
+    会把整行文案钉死在默认英文上），改为只存 ``{"key": ..., "params": {...}}``，
+    由前端按当前语言渲染。
+
+    既有的一批断言写的是"**中文界面下**该看到什么"（例如"恢复报告里应提到
+    始终旁路"），语义仍然成立 —— 它们要验的是恢复逻辑的**结论**，不是渲染时机。
+    所以这里按中文表渲染一次，让那些断言保持可读、不必改成逐字段比对字典。
+
+    渲染规则与前端一致：
+    - ``mode`` 参数按 ``fan.mode.*`` / ``charge.mode.*`` 查表翻译；
+    - ``area_key`` 参数（``err.restoreFailed`` 用）查表翻译。
+    """
+    zh = Plugin._MSG[lang]
+    out: List[str] = []
+    for item in plugin._restore_report:
+        if not isinstance(item, dict):
+            # 兼容旧格式（万一有遗留的字符串项），原样透传。
+            out.append(str(item))
+            continue
+        key = item.get("key", "")
+        params = dict(item.get("params") or {})
+        if "mode" in params:
+            raw_mode = params["mode"]
+            # 模式名 → 文案键要用后端自己的映射表，不能靠拼字符串：
+            # 模式值 `inhibit-charge` 对应的键是 `mode.inhibit`（不是 mode.inhibit-charge），
+            # 风扇那套同理（`balanced` → `fan.mode.balanced`）。
+            key_for_mode = Plugin._FAN_MODE_MSG_KEYS.get(
+                raw_mode
+            ) or Plugin._MODE_MSG_KEYS.get(raw_mode)
+            params["mode"] = zh.get(key_for_mode, raw_mode)
+        if "area_key" in params:
+            params["area"] = zh.get(params.pop("area_key"), params.get("area_key", ""))
+        template = zh.get(key, key)
+        try:
+            out.append(template.format(**params))
+        except (KeyError, IndexError):
+            out.append(template)
+    return out
+
+
 def teardown_plugins(*plugins, timeout: float = 5.0) -> bool:
     """停掉这些夹具的控制线程，**并等到它们真正退出**。返回是否全部停干净。
 
@@ -559,8 +602,8 @@ def test_restore_on_start():
     check("重启后模式被恢复为始终旁路", "[inhibit-charge]" in read_behaviour(battery))
     check(
         "恢复报告同时提到上限与模式",
-        any("70" in line for line in fresh._restore_report)
-        and any("始终旁路" in line for line in fresh._restore_report),
+        any("70" in line for line in render_report(fresh))
+        and any("始终旁路" in line for line in render_report(fresh)),
         str(fresh._restore_report),
     )
 
@@ -575,7 +618,7 @@ def test_restore_on_start():
     asyncio.run(again._main())
     check("关闭自动恢复后不写上限", (battery / "charge_control_end_threshold").read_text().strip() == "100")
     check("关闭自动恢复后不写模式", "[auto]" in read_behaviour(battery))
-    check("报告说明已关闭", any("关闭" in line for line in again._restore_report), str(again._restore_report))
+    check("报告说明已关闭", any("关闭" in line for line in render_report(again)), str(again._restore_report))
 
     # 通知策略已改为「成功静默、仅失败提示」，不再有开关；确认状态里没有残留字段。
     check(
@@ -1040,7 +1083,7 @@ def test_fan_restore():
     check("启动时发现残留手动并交还 EC", ec.mode_register == 0, str(ec.mode_register))
     check(
         "恢复报告说明风扇已在 EC 手上",
-        any("已确认处于 EC 自动控制" in line for line in plugin._restore_report),
+        any("已确认处于 EC 自动控制" in line for line in render_report(plugin)),
         str(plugin._restore_report),
     )
     # 交还后读回文件也必须真的是自动——只改寄存器不算数（同一处防的正是
@@ -1060,7 +1103,7 @@ def test_fan_restore():
     check("恢复时立即按温度写了一次 PWM（70°C → 160）", ec.pwm == 160, str(ec.pwm))
     check(
         "恢复报告包含风扇模式",
-        any("风扇模式已恢复" in line for line in plugin._restore_report),
+        any("风扇模式已恢复" in line for line in render_report(plugin)),
         str(plugin._restore_report),
     )
 
@@ -1238,7 +1281,7 @@ def test_fan_safety_paths():
     check(
         "测试夹具奏效：失败点落在「已写入手动但未确认」这一分支",
         plugin2._restore_report
-        and all("未确认生效" in line for line in plugin2._restore_report),
+        and all("未确认生效" in line for line in render_report(plugin2)),
         str(plugin2._restore_report),
     )
     check(
@@ -1258,7 +1301,7 @@ def test_fan_safety_paths():
     )
     check(
         "启动恢复失败的报告如实说明",
-        any("未确认生效" in line or "恢复失败" in line for line in plugin2._restore_report),
+        any("未确认生效" in line or "恢复失败" in line for line in render_report(plugin2)),
         str(plugin2._restore_report),
     )
     check("启动恢复失败后没有残留控制线程", plugin2._fan_thread is None, str(plugin2._fan_thread))
@@ -1492,7 +1535,7 @@ def test_fan_handover_gate_and_no_early_exit():
     plugin2._restore_sync()
     check(
         "（真自动）报告给出「已处于 EC 自动控制」这个结论",
-        any("已确认处于 EC 自动控制" in line for line in plugin2._restore_report),
+        any("已确认处于 EC 自动控制" in line for line in render_report(plugin2)),
         str(plugin2._restore_report),
     )
     check(
@@ -1536,7 +1579,7 @@ def test_fan_handover_gate_and_no_early_exit():
     )
     check(
         "读回滞后被纠正后报告如实说明风扇已在 EC 手上",
-        any("已确认处于 EC 自动控制" in line for line in plugin3._restore_report),
+        any("已确认处于 EC 自动控制" in line for line in render_report(plugin3)),
         str(plugin3._restore_report),
     )
 
@@ -1560,12 +1603,12 @@ def test_fan_handover_gate_and_no_early_exit():
     plugin4._restore_sync()
     check(
         "交还失败时如实报告未确认生效（不得因为读回是自动就写成已确认）",
-        any("未确认生效" in line for line in plugin4._restore_report),
+        any("未确认生效" in line for line in render_report(plugin4)),
         str(plugin4._restore_report),
     )
     check(
         "交还失败时不会误报成已交还（措辞与实际情况对应）",
-        not any("已确认处于 EC 自动控制" in line for line in plugin4._restore_report),
+        not any("已确认处于 EC 自动控制" in line for line in render_report(plugin4)),
         str(plugin4._restore_report),
     )
 
@@ -2937,6 +2980,77 @@ def test_i18n():
         ),
         zh_msg,
     )
+
+    # ---- 启动恢复报告必须是「结构化」的，不能是启动时渲染好的成品文案 ----
+    # 回归守卫（真机发现）：启动恢复发生在**前端推语言之前**（`_main` 早于
+    # `set_locale`），所以报告里的文案按默认 "en" 渲染 → 中文界面下
+    # 「设置 → Decky 启动时自动恢复」下面那行提示恒为英文，且**重开插件也不会变**
+    # （报告只在启动时生成一次）。
+    #
+    # 只断言"英文界面下有没有汉字"抓不住这个缺陷（它是反的：英文环境下正常）。
+    # 有效判据是**结构**：报告项里不得出现任何成品文案（尤其本地化后的 label），
+    # 只能有 `key` + 原始参数；渲染交给前端按当前语言做。
+    report_plugin = plugin_en()
+    tmp_report = Path(tempfile.mkdtemp(prefix="f1pro-18r-"))
+    isolated_settings(report_plugin, tmp_report)
+    try:
+        battery_r, kernel_r = make_battery(
+            tmp_report, behaviours=["auto", "inhibit-charge"], active="auto", threshold=95
+        )
+        install_fake_sysfs(tmp_report, kernel_r, [battery_r])
+        # 存一套"需要恢复"的设置，让报告非空且含多种条目。
+        report_plugin._update_setting("mode", "inhibit-charge")
+        report_plugin._update_setting("threshold", 80)
+        report_plugin._update_setting("fan_mode", report_plugin.FAN_MODE_BALANCED)
+        report_plugin._update_setting("auto_restore", True)
+
+        # 用英文布局生成报告（模拟真实启动时语言还没被前端推送）。
+        Plugin._lang = "en"
+        report_plugin._restore_report = []
+        report_plugin._restore_sync()
+        report_items = list(report_plugin._restore_report)
+    finally:
+        teardown_plugins(report_plugin)
+        shutil.rmtree(tmp_report, ignore_errors=True)
+        Plugin._lang = "en"
+
+    check("恢复报告非空（夹具确实触发了恢复路径）", len(report_items) > 0, str(report_items))
+
+    # 每项必须是 dict 且带 "key" —— 这是"结构化"的硬判据。
+    not_structured = [
+        it for it in report_items
+        if not (isinstance(it, dict) and isinstance(it.get("key"), str))
+    ]
+    check("恢复报告每项都是 {key, params} 结构", not_structured == [], str(not_structured))
+
+    # 任何一项里都不得夹带成品文案：键与参数值都必须只含 ASCII 标识符
+    # （模式名形如 `inhibit-charge` / `balanced`，本地化后的 label
+    # （"均衡" / "Bypass always"）会在这里现形）。
+    suspicious = []
+    for it in report_items:
+        if not isinstance(it, dict):
+            continue
+        key = it.get("key", "")
+        if not re.fullmatch(r"[a-z][A-Za-z.]*", str(key)):
+            suspicious.append(("key", key))
+        for pk, pv in (it.get("params") or {}).items():
+            if isinstance(pv, str) and not re.fullmatch(r"[a-z][a-z0-9_-]*", pv):
+                suspicious.append((pk, pv))
+    check(
+        "报告项不含成品文案（模式名传原始名而非本地化标签）",
+        suspicious == [],
+        str(suspicious),
+    )
+
+    # 语言切换后报告**逐字节不变** —— 证明它确实与语言解耦。
+    Plugin._lang = "zh"
+    report_after = json.loads(json.dumps(report_items))
+    check(
+        "报告结构不随语言变化（渲染推迟到前端）",
+        report_after == report_items,
+        f"zh={report_after} en={report_items}",
+    )
+    Plugin._lang = "en"
 
     # 恢复语言，避免污染后续场景（不同测试共享 Plugin 类）。
     Plugin._lang = "en"

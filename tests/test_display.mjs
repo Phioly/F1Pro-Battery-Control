@@ -1726,9 +1726,16 @@ if (i18n === null) {
   // 两张表：键集一致 + 占位符一致 + 英文表无汉字
   const parseTable = (name) => {
     const src = readFileSync(join(here, "..", "src", "i18n", `${name}.ts`), "utf-8");
+    // **单双引号都要抓**：英文表里含内嵌双引号的条目写成
+    //   `"restore.fanModeRestored": 'Fan mode restored to "{mode}"',`
+    // 只匹配双引号会静默漏掉这几条，于是"键集一致"永远为真 —— 假绿。
+    // （v0.6.14 加恢复报告键时正是这么漏掉的，靠下面新增的交叉核对才发现。）
     const out = {};
-    for (const m of src.matchAll(/"([\w.]+)":\s*"((?:[^"\\]|\\.)*)"/g)) {
-      out[m[1]] = m[2].replace(/\\"/g, '"');
+    for (const m of src.matchAll(/"([\w.]+)":\s*(["'])((?:\\.|(?!\2)[^\\])*)\2/g)) {
+      out[m[1]] = m[3]
+        .replace(/\\"/g, '"')
+        .replace(/\\'/g, "'")
+        .replace(/\\\\/g, "\\");
     }
     return out;
   };
@@ -1754,10 +1761,19 @@ if (i18n === null) {
     (() => {
       const m = keysSrc.match(/MESSAGE_KEYS = \[([\s\S]*?)\] as const/);
       if (!m) return "找不到 MESSAGE_KEYS";
-      const keys = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+      // **先剥注释**：注释里出现的引号文字（如 `指明"哪个环节"`）会被
+      // 下面的正则当成一个键，然后报"表里缺这条"——纯假阳性。
+      // 本项目已三次踩"注释造成假阳性"，这里也不例外。
+      const body = m[1]
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+      const keys = [...body.matchAll(/"([^"]+)"/g)].map((x) => x[1]);
       const missZh = keys.filter((k) => !(k in zhFull));
       const extraZh = Object.keys(zhFull).filter((k) => !keys.includes(k));
-      if (missZh.length || extraZh.length) return `缺=${missZh} 多=${extraZh}`;
+      // 返回**字符串**：下面 `check` 用严格相等比较，直接返回数组永不相等。
+      if (missZh.length || extraZh.length) {
+        return `缺=[${missZh.join(",")}] 多=[${extraZh.join(",")}]`;
+      }
       return "";
     })(),
     "",
@@ -1901,8 +1917,246 @@ if (i18n === null) {
     // 恢复报告的分隔符必须按语言取，不能写死全角分号。
     check(
       "restore_report 分隔符按语言取",
-      /restore_report\.join\(t\("diag\.reportSeparator"\)\)/.test(source),
+      /renderRestoreReport\(state\.restore_report,\s*t\)\.join\(\s*t\("diag\.reportSeparator"\),?\s*\)/.test(
+        source,
+      ),
       true,
+    );
+
+    // ---- 恢复报告必须由前端按当前语言渲染（真机缺陷回归守卫）----
+    // 后端在 `_main()` 生成报告，那时前端还没推语言过去（`set_locale` 在后），
+    // 若后端自己渲染就会把整行钉死在默认英文上 —— 中文界面下
+    // 「设置 → Decky → 启动时自动恢复」那行提示恒为英文，重开插件也不变。
+    check(
+      "后端只给结构化条目（不是渲染好的文案）",
+      /restore_report:\s*RestoreReportItem\[\]/.test(source),
+      true,
+    );
+    check(
+      "前端用 renderRestoreReport 渲染（而不是直接 join 成品字符串）",
+      /renderRestoreReport/.test(source) &&
+        !/state\.restore_report\.join\(/.test(source),
+      true,
+    );
+    // 模式名要走查表翻译：英文界面显示 "Balanced"，中文显示「均衡」。
+    check(
+      "renderRestoreReport 会把 mode 参数查表翻译",
+      /FAN_MODE_LABEL_KEYS\[mode\]/.test(source) && /MODE_LABEL_KEYS\[mode\]/.test(source),
+      true,
+    );
+    // `err.restoreFailed` 的环节名同理（后端传 area_key，不是渲染好的词）。
+    check(
+      "renderRestoreReport 会把 area_key 参数查表翻译",
+      /params\.area = t\(params\.area_key/.test(source),
+      true,
+    );
+
+    // ---- 真求值：中英文下渲染结果必须不同（这才是真缺陷的判据）----
+    const renderDecl = pick(
+      /const renderRestoreReport = \([\s\S]*?\n  \}\);/,
+      "renderRestoreReport 定义",
+    );
+    const fanKeysDecl = pick(
+      /const FAN_MODE_LABEL_KEYS: Record<string, MessageKey> = \{[\s\S]*?\n\};/,
+      "FAN_MODE_LABEL_KEYS 表",
+    );
+    const chargeKeysDecl = pick(
+      /const MODE_LABEL_KEYS: Record<string, MessageKey> = \{[\s\S]*?\n\};/,
+      "MODE_LABEL_KEYS 表",
+    );
+
+    // 假表 + 假 t：模拟前端 i18n 的两张表（值随语言不同）。
+    // `renderRestoreReport` 的签名带 TS 标注（`new Function` 不认），
+    // 这里窄剥三处：参数类型、返回值类型、以及 `as MessageKey` 断言。
+    const renderRunnable = renderDecl
+      .replace(/items:\s*RestoreReportItem\[\]\s*\|\s*undefined,/, "items,")
+      .replace(
+        /t:\s*\(key: MessageKey, values\?: Record<string, string \| number>\) => string,/,
+        "t,",
+      )
+      .replace(/\):\s*string\[\]\s*=>/, ") =>")
+      .replace(
+        /const params: Record<string, string \| number> =/,
+        "const params =",
+      )
+      .replace(/ as MessageKey/g, "");
+    const buildRender = new Function(
+      "FAN_MODE_LABEL_KEYS",
+      "MODE_LABEL_KEYS",
+      `${renderRunnable}\nreturn renderRestoreReport;`,
+    );
+    const fakeTables = (lang) => {
+      const fanKeys = {
+        auto: "fan.mode.auto",
+        balanced: "fan.mode.balanced",
+        custom: "fan.mode.custom",
+      };
+      const chargeKeys = {
+        auto: "charge.mode.auto",
+        "inhibit-charge": "charge.mode.inhibit",
+      };
+      const table =
+        lang === "zh"
+          ? {
+              "fan.mode.balanced": "均衡",
+              "charge.mode.inhibit": "始终旁路",
+              "common.fanControl": "风扇控制",
+              "restore.fanModeRestored": "风扇模式已恢复为「{mode}」",
+              "restore.modeRestored": "充电模式已恢复为「{mode}」",
+              "err.restoreFailed": "{area}恢复失败：{detail}",
+            }
+          : {
+              "fan.mode.balanced": "Balanced",
+              "charge.mode.inhibit": "Bypass always",
+              "common.fanControl": "Fan control",
+              "restore.fanModeRestored": 'Fan mode restored to "{mode}"',
+              "restore.modeRestored": 'Charge mode restored to "{mode}"',
+              "err.restoreFailed": "{area} restore failed: {detail}",
+            };
+      const tFn = (key, values) => {
+        const template = table[key] ?? key;
+        if (!values) return template;
+        return template.replace(/\{(\w+)\}/g, (_, name) =>
+          values[name] === undefined ? `{${name}}` : String(values[name]),
+        );
+      };
+      return { fanKeys, chargeKeys, tFn, render: buildRender(fanKeys, chargeKeys) };
+    };
+
+    const zhKit = fakeTables("zh");
+    const enKit = fakeTables("en");
+    // 两条真实形态的报告项（与后端 `_report_entry` 产出的结构一致）。
+    const sampleReport = [
+      { key: "restore.fanModeRestored", params: { mode: "balanced" } },
+      { key: "restore.modeRestored", params: { mode: "inhibit-charge" } },
+    ];
+
+    check(
+      "中文下渲染出中文模式名",
+      zhKit.render(sampleReport, zhKit.tFn).join("；"),
+      "风扇模式已恢复为「均衡」；充电模式已恢复为「始终旁路」",
+    );
+    check(
+      "英文下渲染出英文模式名",
+      enKit.render(sampleReport, enKit.tFn).join("; "),
+      'Fan mode restored to "Balanced"; Charge mode restored to "Bypass always"',
+    );
+    check(
+      "同一份报告在中英下渲染结果不同（证明语言解耦生效）",
+      zhKit.render(sampleReport, zhKit.tFn).join("") !==
+        enKit.render(sampleReport, enKit.tFn).join(""),
+      true,
+    );
+    // `err.restoreFailed` 的 area_key 也要过查表。
+    check(
+      "area_key 被翻译成当前语言的环节名",
+      zhKit.render(
+        [{ key: "err.restoreFailed", params: { area_key: "common.fanControl", detail: "X" } }],
+        zhKit.tFn,
+      )[0],
+      "风扇控制恢复失败：X",
+    );
+    // 未知模式名不该崩，也不该被吞成空串（原样透出便于排查）。
+    check(
+      "未知模式名原样透出（不崩、不为空）",
+      zhKit.render(
+        [{ key: "restore.modeRestored", params: { mode: "brand-new-mode" } }],
+        zhKit.tFn,
+      )[0],
+      "充电模式已恢复为「brand-new-mode」",
+    );
+
+    // ---- 前端表必须覆盖后端报告路径产出的**全部**键 ----
+    // 后端现在只给键，文案全在前端表里。前端漏一条，界面就会显示成键名
+    // （`createTranslator` 找不到键时原样返回键）—— 这在真机上不易察觉，
+    // 所以离线直接从 `main.py` 交叉核对，别指望人工同步两张表。
+    const backendSrc = readFileSync(join(here, "..", "main.py"), "utf8");
+    // 1) `_report_entry("...")` 用到的键
+    const reportKeys = [
+      ...backendSrc.matchAll(/_report_entry\(\s*["']([A-Za-z][\w.]*)["']/g),
+    ].map((m) => m[1]);
+    // 2) `area_key="..."` 用到的环节名（renderRestoreReport 会查它们）
+    const areaKeys = [
+      ...backendSrc.matchAll(/area_key=["']([\w.]+)["']/g),
+    ].map((m) => m[1]);
+    const needed = [...new Set([...reportKeys, ...areaKeys])].sort();
+
+    // 逐条抓 `"键": "值"`。**不用 JSON.parse**：表里有 `//` 注释与跨行字符串，
+    // 正规 JSON 解析器直接拒收；用"取表 + 填占位"这套本来就只有字符串字面量，
+    // 逐条抓已经足够，也顺带对多行写法免疫。
+    // 剥注释是必须的 —— 否则注释里的示例键会被误当成真实条目（本项目已踩过三次）。
+    const parseTable = (file) => {
+      const raw = readFileSync(join(here, "..", "src", "i18n", file), "utf8");
+      const body = raw.slice(raw.indexOf("= {") + 2);
+      const withoutComments = body
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+      const table = {};
+      // 值可能用单引号或双引号包着，且内容里可能带**转义引号**
+      // （英文表里 `'Fan mode restored to "{mode}"'` 就同时有单双引号）。
+      // 用"非引号字符或反斜杠转义对"来匹配值体，两种引号都能吃下。
+      const re = /"([A-Za-z][\w.]*)"\s*:\s*(["'])((?:\\.|(?!\2)[^\\])*)\2/g;
+      let m;
+      while ((m = re.exec(withoutComments)) !== null) {
+        table[m[1]] = m[3]
+          .replace(/\\"/g, '"')
+          .replace(/\\'/g, "'")
+          .replace(/\\\\/g, "\\");
+      }
+      return table;
+    };
+    const zhTable = parseTable("zh-CN.ts");
+    const enTable = parseTable("en-US.ts");
+
+    check(
+      "从 main.py 里确实枚举到了报告键（否则本断言是空转的）",
+      needed.length >= 15,
+      true,
+    );
+    check(
+      "中文表覆盖后端全部报告键",
+      needed.filter((k) => zhTable[k] === undefined).join(","),
+      "",
+    );
+    check(
+      "英文表覆盖后端全部报告键",
+      needed.filter((k) => enTable[k] === undefined).join(","),
+      "",
+    );
+    // 占位符也得对齐：后端模板用 `{mode}` / `{area_key}`，前端表若写成
+    // `{label}` / `{area}` 就会渲染出字面花括号。
+    // 注意 `err.restoreFailed` 是唯一例外：后端传 `area_key`，前端把参数名
+    // 换成 `area` 再填，所以前端表里写的是 `{area}`。
+    const placeholderMismatch = [];
+    for (const key of needed) {
+      const backendMatch = new RegExp(
+        `"${key.replace(/\./g, "\\.")}":\\s*(?:\\(\\s*)?"([^"]*)"`,
+      ).exec(backendSrc);
+      if (!backendMatch) continue;
+      const backendPlaceholders = [
+        ...backendMatch[1].matchAll(/\{(\w+)\}/g),
+      ].map((m) => m[1]).sort();
+      for (const [lang, table] of [
+        ["zh", zhTable],
+        ["en", enTable],
+      ]) {
+        const tmpl = table[key];
+        if (typeof tmpl !== "string") continue;
+        const frontPlaceholders = [...tmpl.matchAll(/\{(\w+)\}/g)]
+          .map((m) => m[1])
+          .map((name) => (name === "area" ? "area_key" : name))
+          .sort();
+        if (frontPlaceholders.join(",") !== backendPlaceholders.join(",")) {
+          placeholderMismatch.push(
+            `${key}[${lang}] front=${frontPlaceholders} back=${backendPlaceholders}`,
+          );
+        }
+      }
+    }
+    check(
+      "报告键的占位符前后端一致（前端 area_key 渲染成 {area}）",
+      placeholderMismatch.join(" | "),
+      "",
     );
   }
 }

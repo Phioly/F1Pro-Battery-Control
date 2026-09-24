@@ -115,4 +115,32 @@ export const enUS: Record<MessageKey, string> = {
   "error.saveCurve": "Failed to save custom curve",
   "error.curveSavedSwitchFailed":
     "Curve saved, but switching to Custom mode failed — not yet active on the fan",
+
+  // ---- Startup restore report (mirrors the same keys in the backend table) ----
+  "restore.fanEcAuto": "Fan confirmed under EC auto control",
+  "restore.fanHandoverUnconfirmed":
+    "Fan handover to the EC could not be confirmed",
+  "restore.fanModeRestored": 'Fan mode restored to "{mode}"',
+  "restore.fanManualUnconfirmed":
+    'Fan switch to manual control could not be confirmed (target "{mode}")',
+  "restore.autoOff": "Auto restore on startup is off",
+  "restore.batteryMissing": "Battery node not found: {exc}",
+  "restore.noThresholdNode":
+    "Kernel has no charge_control_end_threshold; skipping limit restore",
+  "restore.thresholdRestored": "Charge limit restored to {value}%",
+  "restore.thresholdUnconfirmed":
+    "Charge limit restore could not be confirmed (target {value}%)",
+  "restore.noBehaviourNode":
+    "Kernel has no charge_behaviour; skipping mode restore",
+  "restore.modeUnsupported":
+    'Kernel does not support "{mode}"; mode not restored',
+  "restore.modeRestored": 'Charge mode restored to "{mode}"',
+  "restore.modeUnconfirmed":
+    'Charge mode restore could not be confirmed (target "{mode}")',
+  "restore.nothing": "Nothing to restore",
+  "err.batteryProbe": "No battery node supporting charge control was found",
+  "err.restoreFailed": "{area} restore failed: {detail}",
+  "common.chargeMode": "Charge mode",
+  "common.chargeLimit": "Charge limit",
+  "common.fanControl": "Fan control",
 };
