@@ -2893,6 +2893,51 @@ def test_i18n():
         bad = f"AttributeError: {exc}"
     check("曲线校验在 classmethod 里也能取到本地化文案", bad is not None and "递增" in bad, str(bad))
 
+    # ---- 真实 RPC 错误路径也必须跟随语言（不能只有 _t 的表在双语）----
+    # 回归守卫：`set_charge_mode` 里「写入后状态未生效」那条曾是**硬编码中文**
+    # 的 f-string，绕过了 `_t`。表里明明有 `err.modeNotApplied` 却没人用，
+    # 结果是英文界面下唯独这条错误吐中文。断言方式必须让它换个语言就变 ——
+    # 只查"含不含某中文词"在硬编码时也是绿的，抓不住。
+    tmp_i18n = Path(tempfile.mkdtemp(prefix="f1pro-18-"))
+    plugin_i18n = plugin_zh()
+    isolated_settings(plugin_i18n, tmp_i18n)
+    try:
+        battery_i18n, kernel_i18n = make_battery(
+            tmp_i18n, behaviours=["auto", "inhibit-charge"], active="auto"
+        )
+        install_fake_sysfs(tmp_i18n, kernel_i18n, [battery_i18n])
+        # 内核**接受**写入但静默丢弃 → active 恒为 auto → 走 `_wait_for` 超时那条
+        # 失败分支（正是我们要覆盖的那个 raise）。
+        kernel_i18n.silently_ignore.add("charge_behaviour")
+
+        Plugin._lang = "zh"
+        zh_msg = asyncio.run(plugin_i18n.set_charge_mode("inhibit-charge")).get("error", "")
+        Plugin._lang = "en"
+        en_msg = asyncio.run(plugin_i18n.set_charge_mode("inhibit-charge")).get("error", "")
+    finally:
+        teardown_plugins(plugin_i18n)
+        shutil.rmtree(tmp_i18n, ignore_errors=True)
+        Plugin._lang = "en"
+
+    check(
+        "「写入后未生效」错误在英文界面下不含汉字",
+        en_msg and not re.search(r"[\u4e00-\u9fff]", en_msg),
+        f"en={en_msg!r}",
+    )
+    check(
+        "该错误随语言切换（中英不同、都非空）",
+        bool(zh_msg) and bool(en_msg) and zh_msg != en_msg,
+        f"zh={zh_msg!r} en={en_msg!r}",
+    )
+    check(
+        "中文文案就是 err.modeNotApplied 模板渲染出来的",
+        zh_msg
+        == Plugin._MSG["zh"]["err.modeNotApplied"].format(
+            mode="inhibit-charge", actual="auto"
+        ),
+        zh_msg,
+    )
+
     # 恢复语言，避免污染后续场景（不同测试共享 Plugin 类）。
     Plugin._lang = "en"
 

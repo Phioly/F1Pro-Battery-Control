@@ -258,6 +258,26 @@ def main() -> int:
     # ------------------------------------------------------------------ 打包
     version = pkg["version"]
     zip_name = OUTPUT_DIR / f"F1ProECControl-v{version}.zip"
+    # 发布包内的 package.json 与仓库里的**不完全相同**：把开发向脚本删掉。
+    #
+    # 为什么（用户复查指出的 Low）：`scripts/` 有意不进发布包（那是开发工具），
+    # 但包里那份 package.json 仍带着
+    #     "test": "node scripts/run-tests.mjs display",
+    #     "test:backend": ..., "test:all": ...
+    # 于是从解压出来的目录跑 `npm test` 必然报 MODULE_NOT_FOUND —— 一条
+    # 注定失败的命令留在包里只会误导（不影响 Decky 运行，它直接读 dist/index.js）。
+    # 这里保留其他 scripts（build / watch / typecheck 都是标准命令、路径也在包内），
+    # 只摘掉指向 scripts/ 的那三条。
+    runtime_pkg = dict(pkg)
+    dropped_scripts = {}
+    if isinstance(runtime_pkg.get("scripts"), dict):
+        runtime_scripts = dict(runtime_pkg["scripts"])
+        for key, cmd in list(runtime_scripts.items()):
+            if isinstance(cmd, str) and "scripts/run-tests.mjs" in cmd:
+                dropped_scripts[key] = runtime_scripts.pop(key)
+        runtime_pkg["scripts"] = runtime_scripts
+    runtime_pkg_text = json.dumps(runtime_pkg, indent=2, ensure_ascii=False) + "\n"
+
     with zipfile.ZipFile(zip_name, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(PLUGIN_DIR):
             dirs[:] = sorted(d for d in dirs if d not in EXCLUDE_DIRS)
@@ -266,10 +286,15 @@ def main() -> int:
                     continue
                 if name == ".DS_Store":
                     continue
+                arc = (Path(root) / name).relative_to(PLUGIN_DIR.parent).as_posix()
+                if name == "package.json" and Path(root) == PLUGIN_DIR:
+                    # 用改写过的内容替换（不落盘，只写进 zip）。
+                    zf.writestr(arc, runtime_pkg_text)
+                    continue
                 full = Path(root) / name
                 # 用 PLUGIN_DIR 作基准，保证 zip 内顶层目录就是插件文件夹名
                 # （Decky 要求安装包顶层只有插件目录一个）
-                zf.write(full, full.relative_to(PLUGIN_DIR.parent).as_posix())
+                zf.write(full, arc)
 
     print(f"\n=== {zip_name.name} ===")
     with zipfile.ZipFile(zip_name) as zf:
@@ -297,6 +322,23 @@ def main() -> int:
         "发布包内不含 .git / tests / src / scripts / 开发工具",
         not bad,
         f"多出：{bad[:6]}" if bad else "",
+    )
+    # 包内 package.json 不得残留指向 scripts/（该目录有意不进包）的命令，
+    # 否则解压目录里 `npm test` 必失败。装配时已删除，这里做回归断言。
+    with zipfile.ZipFile(zip_name) as zf:
+        pkg_arc = next((n for n in zf.namelist() if n.endswith("/package.json")), None)
+        packed = json.loads(zf.read(pkg_arc).decode("utf-8")) if pkg_arc else {}
+    packed_scripts = packed.get("scripts", {})
+    dangling = {
+        k: v
+        for k, v in packed_scripts.items()
+        if isinstance(v, str) and "scripts/run-tests.mjs" in v
+    }
+    c.check("包内 package.json 不含指向 scripts/ 的测试命令", not dangling, str(dangling))
+    c.check(
+        "包内 package.json 仍保留 build 命令（构建链自洽）",
+        "build" in packed_scripts,
+        str(sorted(packed_scripts)),
     )
     print(f"  大小: {zip_name.stat().st_size} 字节")
     print(f"  版本: {version}")

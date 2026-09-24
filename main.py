@@ -1063,7 +1063,7 @@ class Plugin:
             if not self._wait_for(_applied):
                 actual = self._parse_behaviours(self._read_or_none(node))["active"]
                 raise RuntimeError(
-                    f"写入后状态未生效：期望 {mode}，内核实际返回 {actual}"
+                    self._t("err.modeNotApplied", mode=mode, actual=actual)
                 )
 
             self._update_setting("mode", mode)

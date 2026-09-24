@@ -107,6 +107,8 @@ const zhCN = {
     "fan.diag.controller": "控制器：{value}",
     "fan.diag.tempSensor": "温度传感器：{value}",
     "fan.diag.pwmNode": "PWM 节点：{value}",
+    "fan.diag.pwmEnable": "pwm1_enable：{value}",
+    "fan.diag.pwmEnableLabel": "（{value}）",
     "fan.diag.controlMethod": "控制方式：{value}",
     "fan.diag.safetyTemp": "安全阈值：{value}°C（达到即满速）",
     "fan.diag.safetyNote": "",
@@ -123,6 +125,8 @@ const zhCN = {
     "diag.acNoNode": "无节点",
     "diag.batteryNodeMissing": "未找到电池节点",
     "diag.thresholdNode": "threshold 节点：{value}",
+    "diag.rawNode": "{name}：{value}",
+    "diag.reportSeparator": "；",
     "diag.fan": "风扇：{value}",
     "diag.fanUnavailable": "不可用",
     "diag.fanManual": "手动",
@@ -201,6 +205,8 @@ const enUS = {
     "fan.diag.controller": "Controller: {value}",
     "fan.diag.tempSensor": "Temp sensor: {value}",
     "fan.diag.pwmNode": "PWM node: {value}",
+    "fan.diag.pwmEnable": "pwm1_enable: {value}",
+    "fan.diag.pwmEnableLabel": " ({value})",
     "fan.diag.controlMethod": "Control: {value}",
     "fan.diag.safetyTemp": "Safety threshold: {value}°C (full speed at or above)",
     "fan.diag.safetyNote": "",
@@ -217,6 +223,8 @@ const enUS = {
     "diag.acNoNode": "no node",
     "diag.batteryNodeMissing": "Battery node not found",
     "diag.thresholdNode": "threshold node: {value}",
+    "diag.rawNode": "{name}: {value}",
+    "diag.reportSeparator": "; ",
     "diag.fan": "Fan: {value}",
     "diag.fanUnavailable": "unavailable",
     "diag.fanManual": "manual",
@@ -336,14 +344,28 @@ const setAutoRestore = callable("set_auto_restore");
  * 为什么加载与刷新代码里再调一次：Decky 重新加载插件时**不会**重新挂载
  * 已存在的组件树（只重跑后端的 `_main`），此时 `_lang` 会退回类属性默认值
  * `"en"`；不过前端此时会重新加载并重新执行模块顶层的这段代码，所以这里
- * 补一次即可对齐。失败静默忽略：拿不到语言时后端退回英文，不该因此报错。
+ * 补一次即可对齐。失败**不报错**，但会允许下次重试（见下）。
  */
 const setLocale = callable("set_locale");
+/**
+ * 已发出的语言同步请求；`null` 表示"还没成功过、可以再试"。
+ *
+ * **失败必须复位成 `null`**（这是回归守卫修正的一个真实缺陷）：最初写成
+ * `localePushed = Promise.resolve(setLocale(lang)).catch(() => undefined)`，
+ * 失败后这个 Promise **照样是"已设置"状态** —— 于是后续每次 `pushLocale`
+ * 都在第 140 行被 `if (localePushed) return` 挡掉，永远不会重试。
+ * 触发场景是真实存在的：插件刚加载时 Decky 后端可能还没就绪，第一次
+ * `set_locale` 会 reject；此后后端一直停在默认英文，用户切中文界面却看到
+ * 英文错误文案，**直到手动重载插件**才恢复。所以 catch 里要把它清回 `null`。
+ */
 let localePushed = null;
 const pushLocale = (lang) => {
     if (localePushed)
         return;
-    localePushed = Promise.resolve(setLocale(lang)).catch(() => undefined);
+    localePushed = Promise.resolve(setLocale(lang)).then(() => undefined, () => {
+        // 重置，让下一次 `pushLocale`（下次挂载或轮询重建时）能再试一次。
+        localePushed = null;
+    });
 };
 const getFanStatus = callable("get_fan_status");
 const getFanProfiles = callable("get_fan_profiles");
@@ -965,7 +987,11 @@ function Content() {
                                     opacity: 0.75,
                                 }, children: [t("fan.diag.controller", { value: fan?.controller ?? "--" }), SP_JSX.jsx("br", {}), t("fan.diag.tempSensor", { value: fan?.temp_sensor ?? "--" }), SP_JSX.jsx("br", {}), t("fan.diag.pwmNode", {
                                         value: fan?.pwm ?? t("common.notExist"),
-                                    }), SP_JSX.jsx("br", {}), "pwm1_enable\uFF1A", fan?.pwm_enable ?? t("common.notExist"), fan?.pwm_enable_label ? `（${fan.pwm_enable_label}）` : "", SP_JSX.jsx("br", {}), t("fan.diag.controlMethod", {
+                                    }), SP_JSX.jsx("br", {}), t("fan.diag.pwmEnable", {
+                                        value: fan?.pwm_enable ?? t("common.notExist"),
+                                    }), fan?.pwm_enable_label
+                                        ? t("fan.diag.pwmEnableLabel", { value: fan.pwm_enable_label })
+                                        : "", SP_JSX.jsx("br", {}), t("fan.diag.controlMethod", {
                                         value: fan?.manual ? t("fan.manual") : t("fan.ecAuto"),
                                     }), SP_JSX.jsx("br", {}), t("fan.diag.safetyTemp", { value: fan?.safety_temp ?? "--" })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy, onClick: refreshFan, children: t("common.refresh") }) })] })] }));
     }
@@ -1029,13 +1055,22 @@ function Content() {
                                     ? t("battery.checked", { label: fanModeLabel(mode) })
                                     : fanModeLabel(mode) }) }, mode))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setView("fan"), children: t("fan.editCurve") }) })] })) : (
                 // 不可用时**只留一行原因**，不要摆一排点了没反应的按钮。
-                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { ...blockStyle, opacity: 0.8 }, children: fan?.reason ?? fanError ?? t("fan.unavailableDefault") }) })) }), SP_JSX.jsxs(DFL.PanelSection, { title: t("settings.section"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: t("settings.autoRestore"), description: t("settings.autoRestoreDesc"), checked: state?.auto_restore ?? true, disabled: busy, onChange: changeAutoRestore }) }), state?.restore_report && state.restore_report.length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: state.restore_report.join("；") }) }))] }), error && (SP_JSX.jsx(DFL.PanelSection, { title: t("common.hint"), children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: t("common.diagnostic"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
+                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { ...blockStyle, opacity: 0.8 }, children: fan?.reason ?? fanError ?? t("fan.unavailableDefault") }) })) }), SP_JSX.jsxs(DFL.PanelSection, { title: t("settings.section"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: t("settings.autoRestore"), description: t("settings.autoRestoreDesc"), checked: state?.auto_restore ?? true, disabled: busy, onChange: changeAutoRestore }) }), state?.restore_report && state.restore_report.length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: state.restore_report.join(t("diag.reportSeparator")) }) }))] }), error && (SP_JSX.jsx(DFL.PanelSection, { title: t("common.hint"), children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: t("common.diagnostic"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
                                 whiteSpace: "normal",
                                 lineHeight: 1.35,
                                 fontFamily: "monospace",
                                 fontSize: "11px",
                                 opacity: 0.75,
-                            }, children: [state?.battery_path ?? t("diag.batteryNodeMissing"), SP_JSX.jsx("br", {}), t("diag.ac", { value: state?.ac_node ?? t("diag.acNoNode") }), acOnline === null ? "" : acOnline ? t("diag.acOnline") : t("diag.acOffline"), SP_JSX.jsx("br", {}), "status: ", state?.status ?? t("common.notExist"), SP_JSX.jsx("br", {}), "charge_behaviour: ", state?.behaviour_raw ?? t("common.notExist"), SP_JSX.jsx("br", {}), "power_now: ", state?.power_now ?? t("common.notExist"), SP_JSX.jsx("br", {}), t("diag.thresholdNode", {
+                            }, children: [state?.battery_path ?? t("diag.batteryNodeMissing"), SP_JSX.jsx("br", {}), t("diag.ac", { value: state?.ac_node ?? t("diag.acNoNode") }), acOnline === null ? "" : acOnline ? t("diag.acOnline") : t("diag.acOffline"), SP_JSX.jsx("br", {}), t("diag.rawNode", {
+                                    name: "status",
+                                    value: state?.status ?? t("common.notExist"),
+                                }), SP_JSX.jsx("br", {}), t("diag.rawNode", {
+                                    name: "charge_behaviour",
+                                    value: state?.behaviour_raw ?? t("common.notExist"),
+                                }), SP_JSX.jsx("br", {}), t("diag.rawNode", {
+                                    name: "power_now",
+                                    value: state?.power_now ?? t("common.notExist"),
+                                }), SP_JSX.jsx("br", {}), t("diag.thresholdNode", {
                                     value: state?.threshold_node ? t("common.exists") : t("common.notExist"),
                                 }), SP_JSX.jsx("br", {}), t("diag.fan", { value: fan?.controller ?? t("diag.fanNotDetected") }), fan?.available === false
                                     ? ` · ${t("diag.fanUnavailable")}`

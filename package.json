@@ -1,6 +1,6 @@
 {
   "name": "f1pro-ec-control",
-  "version": "0.6.12",
+  "version": "0.6.13",
   "description": "OneXFly F1 Pro (HX 370) charge mode, bypass charging, charge limit and fan control for Decky Loader on SteamOS.",
   "type": "module",
   "main": "dist/index.js",

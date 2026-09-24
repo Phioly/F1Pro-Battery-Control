@@ -434,21 +434,43 @@ check(
 // 主页那一行控制方式**必须无条件取自后端下发的 `pwm_enable_label`**，
 // 不能再自己 `fan?.manual ? ... : ...` —— 后者等于把"读回值 → 手动/自动"
 // 这套判定在前端重算一遍，两处实现迟早会不一致（而且前端算不出 i18n）。
-// 注意这条只针对**主页渲染的那一处**：诊断区块里的 manual 展示是另一回事，
-// 所以断言限定在从 `pwm_enable_label` 取值的表达式上。
+// 注意这条只针对**诊断区渲染的那一处**（早先注释误写成"主页"；全项目只有
+// 这一处用 `pwm_enable_label`）：诊断区展示控制方式必须信后端下发的标签，
+// 不能自己比 `pwm_enable === 1`（oxpec 手动满速时读回 0）。
 const labelExpr = pickExpr(
-  /\{(fan\?\.pwm_enable_label \? `（\$\{fan\.pwm_enable_label\}）` : "")}/,
-  "主页风扇控制方式表达式",
+  /\{(fan\?\.pwm_enable_label\s*\n?\s*\? t\("fan\.diag\.pwmEnableLabel", \{ value: fan\.pwm_enable_label \}\)\s*\n?\s*: "")\}/,
+  "诊断区 pwm_enable_label 表达式",
 );
 check(
-  "主页控制方式不依赖 manual 字段（只信后端下发的标签）",
+  "诊断区控制方式不依赖 manual 字段（只信后端下发的标签）",
   /manual|pwm_enable(?!_label)/.test(labelExpr),
   false,
 );
-const controlLabel = new Function("fan", `return ${labelExpr};`);
-check("后端下发手动 → 原样渲染", controlLabel({ pwm_enable_label: "手动 PWM" }), "（手动 PWM）");
-check("后端下发自动 → 原样渲染", controlLabel({ pwm_enable_label: "EC 自动" }), "（EC 自动）");
-check("后端未下发 → 不渲染任何东西", controlLabel({}), "");
+// 表达式本身引用 `t(...)`，求值时把翻译函数按语言注进去，
+// 顺便断言"括号形状由 i18n 表决定"——中文全角、英文半角。
+function labelOf(fan, tFn) {
+  const fn = new Function("fan", "t", `return ${labelExpr};`);
+  return fn(fan, tFn);
+}
+check(
+  "后端下发手动 → 原样渲染（括号按语言取）",
+  labelOf({ pwm_enable_label: "手动 PWM" }, (k, v) =>
+    k === "fan.diag.pwmEnableLabel" ? `（${v.value}）` : k,
+  ),
+  "（手动 PWM）",
+);
+check(
+  "英文界面用半角括号",
+  labelOf({ pwm_enable_label: "manual PWM" }, (k, v) =>
+    k === "fan.diag.pwmEnableLabel" ? ` (${v.value})` : k,
+  ),
+  " (manual PWM)",
+);
+check(
+  "后端未下发 → 不渲染任何东西",
+  labelOf({}, (k, v) => (k === "fan.diag.pwmEnableLabel" ? `（${v.value}）` : k)),
+  "",
+);
 // 反向验证：这正是"前端自己按读回值判断"的写法，满速读回 0 时会误报自动。
 const wrongLabel = new Function("enable", 'return enable === 1 ? "（手动 PWM）" : "（EC 自动控温）";');
 check("（对照）自行比较 === 1 在满速读回 0 时会误报", wrongLabel(0), "（EC 自动控温）");
@@ -1740,6 +1762,149 @@ if (i18n === null) {
     })(),
     "",
   );
+
+  // ---- 语言推送给后端：失败后必须能重试 ----
+  //
+  // 回归守卫（用户复查指出的 P2）：`pushLocale` 最初写成
+  //   localePushed = Promise.resolve(setLocale(lang)).catch(() => undefined);
+  // 失败后 `localePushed` 仍是"已设置"的 Promise → 后续每次调用都被
+  // `if (localePushed) return` 挡掉，**永远不重试**。真实后果：插件刚加载时
+  // 后端可能还没就绪、第一次 set_locale reject，此后后端一直停在默认英文，
+  // 用户切中文界面却看到英文错误文案，直到手动重载插件。
+  //
+  // 这里**真的把那段逻辑抽出来跑**（而不是"看源码里有没有 .catch"）：
+  // 用假 setLocale 先拒一次、再成功，断言"第二次调用确实又发了请求"。
+  {
+    const decl = pick(
+      /let localePushed[\s\S]*?\n\};/,
+      "pushLocale 实现（含 localePushed 状态）",
+    );
+    check(
+      "pushLocale 定位到了（否则下面的行为断言是空转的）",
+      decl.includes("localePushed") && decl.includes("pushLocale"),
+      true,
+    );
+
+    /** 用抽出的真实源码造一个隔离实例，返回 { pushLocale, calls }。 */
+    const makePusher = (setLocaleImpl) => {
+      const calls = [];
+      const setLocale = (lang) => {
+        calls.push(lang);
+        return setLocaleImpl(calls.length);
+      };
+      // 抽出来的是 TS，`let localePushed: Promise<unknown> | null = null;`
+      // 这句的类型标注不是合法 JS —— 只去掉这一处的标注，别用宽泛的
+      // 冒号替换（会把对象字面量里的 `:` 一起误伤）。
+      const runnable = decl
+        .replace(/let localePushed:[^=]*=/, "let localePushed =")
+        .replace(/\(lang: string\)/, "(lang)")
+        .replace(/: void =>/, " =>");
+      const factory = new Function(
+        "setLocale",
+        `${runnable}\nreturn { pushLocale, peek: () => localePushed };`,
+      );
+      return { ...factory(setLocale), calls };
+    };
+
+    // ① 失败后允许重试：第一次 reject，第二次应当**再次发起**。
+    {
+      const { pushLocale, calls } = makePusher((n) =>
+        n === 1 ? Promise.reject(new Error("backend not ready")) : Promise.resolve({ ok: true }),
+      );
+      pushLocale("zh");
+      check("第一次推送发出了请求", calls.length, 1);
+      // 等拒绝处理完（微任务），再推第二次。
+      await Promise.resolve();
+      await Promise.resolve();
+      pushLocale("zh");
+      check(
+        "首次失败后第二次仍会重试（不能被 localePushed 卡死）",
+        calls.length,
+        2,
+      );
+    }
+
+    // ② 成功之后不再重复发（幂等保护仍在，别为了重试把幂等弄丢）。
+    {
+      const { pushLocale, calls } = makePusher(() => Promise.resolve({ ok: true }));
+      pushLocale("zh");
+      pushLocale("zh");
+      pushLocale("zh");
+      await Promise.resolve();
+      await Promise.resolve();
+      check("成功后重复调用只发一次（幂等保护保持）", calls.length, 1);
+    }
+
+    // ③ 失败后重置成 null —— 直接看状态，不只看调用次数：
+    //    若只是"又发了一次"但状态没清，第三次仍会被旧 Promise 挡住。
+    {
+      const { pushLocale, peek } = makePusher(() =>
+        Promise.reject(new Error("nope")),
+      );
+      pushLocale("zh");
+      await Promise.resolve();
+      await Promise.resolve();
+      check("失败后 localePushed 复位为 null（可再次尝试）", peek(), null);
+    }
+
+    // ④ 成功路径下状态必须**保持非 null**（否则每次挂载都会重发）。
+    {
+      const { pushLocale, peek } = makePusher(() => Promise.resolve({ ok: true }));
+      pushLocale("zh");
+      await Promise.resolve();
+      await Promise.resolve();
+      check("成功后 localePushed 保持已设置", peek() !== null, true);
+    }
+  }
+
+  // ---- 诊断区不得有硬编码的中文标点 / 未本地化的标签 ----
+  //
+  // 回归守卫（用户复查指出的 P2）：诊断区曾有三处漏出中文标点 ——
+  // `pwm1_enable：`（全角冒号）、`（…）`（全角括号）、`join("；")`（全角分号），
+  // 英文界面下会变成中英混排。判定方式是**扫 JSX 里残留的全角标点与裸标签**，
+  // 而不是逐条 includes（新增一处就漏了）。
+  {
+    // 只看 JSX 里的文本，剥掉**块注释与行注释**。
+    // 行注释里当然可以写中文标点（文档就是要用中文），漏剥它们会把
+    // 注释误判成界面文案 —— 这类"注释造成的假阳性"本项目已经踩过三次。
+    const withoutComments = source
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+    // 全角标点：：（）；，、 等 —— 这些绝不能出现在界面文本里，
+    // 只该存在于 i18n 表里按语言取。
+    const fullwidthInJsx = [...withoutComments.matchAll(/[：（）；，、]/g)];
+    const offending = fullwidthInJsx.map((m) => {
+      const line = withoutComments.slice(0, m.index).split("\n").length;
+      return `L${line}:${m[0]}`;
+    });
+    check(
+      "JSX 里没有残留的全角标点（应全部走 i18n 表）",
+      offending.slice(0, 8).join(" ") || "",
+      "",
+    );
+
+    // 诊断区那三个原始内核字段名必须有本地化模板包裹（`diag.rawNode`），
+    // 不能再是裸的 `status: {...}` 这种拼接。
+    const rawNodeUses = [...source.matchAll(/t\("diag\.rawNode"/g)].length;
+    check("三个原始字段走 diag.rawNode 模板", rawNodeUses, 3);
+    check(
+      "不再有裸的 status: / charge_behaviour: / power_now: 拼接",
+      /(^|\s)(status|charge_behaviour|power_now): \{/.test(withoutComments),
+      false,
+    );
+    // pwm1_enable 也必须走模板（它原先还带全角冒号）。
+    check(
+      "pwm1_enable 走 fan.diag.pwmEnable 模板",
+      /t\("fan\.diag\.pwmEnable"/.test(source),
+      true,
+    );
+    // 恢复报告的分隔符必须按语言取，不能写死全角分号。
+    check(
+      "restore_report 分隔符按语言取",
+      /restore_report\.join\(t\("diag\.reportSeparator"\)\)/.test(source),
+      true,
+    );
+  }
 }
 
 console.log(`\n${"=".repeat(60)}`);

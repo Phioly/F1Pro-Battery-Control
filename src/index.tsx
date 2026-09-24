@@ -125,14 +125,31 @@ const setAutoRestore = callable<[enabled: boolean], Result>("set_auto_restore");
  * 为什么加载与刷新代码里再调一次：Decky 重新加载插件时**不会**重新挂载
  * 已存在的组件树（只重跑后端的 `_main`），此时 `_lang` 会退回类属性默认值
  * `"en"`；不过前端此时会重新加载并重新执行模块顶层的这段代码，所以这里
- * 补一次即可对齐。失败静默忽略：拿不到语言时后端退回英文，不该因此报错。
+ * 补一次即可对齐。失败**不报错**，但会允许下次重试（见下）。
  */
 const setLocale = callable<[lang: string], Result>("set_locale");
 
+/**
+ * 已发出的语言同步请求；`null` 表示"还没成功过、可以再试"。
+ *
+ * **失败必须复位成 `null`**（这是回归守卫修正的一个真实缺陷）：最初写成
+ * `localePushed = Promise.resolve(setLocale(lang)).catch(() => undefined)`，
+ * 失败后这个 Promise **照样是"已设置"状态** —— 于是后续每次 `pushLocale`
+ * 都在第 140 行被 `if (localePushed) return` 挡掉，永远不会重试。
+ * 触发场景是真实存在的：插件刚加载时 Decky 后端可能还没就绪，第一次
+ * `set_locale` 会 reject；此后后端一直停在默认英文，用户切中文界面却看到
+ * 英文错误文案，**直到手动重载插件**才恢复。所以 catch 里要把它清回 `null`。
+ */
 let localePushed: Promise<unknown> | null = null;
 const pushLocale = (lang: string): void => {
   if (localePushed) return;
-  localePushed = Promise.resolve(setLocale(lang)).catch(() => undefined);
+  localePushed = Promise.resolve(setLocale(lang)).then(
+    () => undefined,
+    () => {
+      // 重置，让下一次 `pushLocale`（下次挂载或轮询重建时）能再试一次。
+      localePushed = null;
+    },
+  );
 };
 
 const getFanStatus = callable<[], FanResult>("get_fan_status");
@@ -928,8 +945,12 @@ function Content() {
                 value: fan?.pwm ?? t("common.notExist"),
               })}
               <br />
-              pwm1_enable：{fan?.pwm_enable ?? t("common.notExist")}
-              {fan?.pwm_enable_label ? `（${fan.pwm_enable_label}）` : ""}
+              {t("fan.diag.pwmEnable", {
+                value: fan?.pwm_enable ?? t("common.notExist"),
+              })}
+              {fan?.pwm_enable_label
+                ? t("fan.diag.pwmEnableLabel", { value: fan.pwm_enable_label })
+                : ""}
               <br />
               {t("fan.diag.controlMethod", {
                 value: fan?.manual ? t("fan.manual") : t("fan.ecAuto"),
@@ -1167,7 +1188,7 @@ function Content() {
         {state?.restore_report && state.restore_report.length > 0 && (
           <PanelSectionRow>
             <div style={{ whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }}>
-              {state.restore_report.join("；")}
+              {state.restore_report.join(t("diag.reportSeparator"))}
             </div>
           </PanelSectionRow>
         )}
@@ -1197,11 +1218,20 @@ function Content() {
             {t("diag.ac", { value: state?.ac_node ?? t("diag.acNoNode") })}
             {acOnline === null ? "" : acOnline ? t("diag.acOnline") : t("diag.acOffline")}
             <br />
-            status: {state?.status ?? t("common.notExist")}
-            <br />
-            charge_behaviour: {state?.behaviour_raw ?? t("common.notExist")}
-            <br />
-            power_now: {state?.power_now ?? t("common.notExist")}
+              {t("diag.rawNode", {
+                name: "status",
+                value: state?.status ?? t("common.notExist"),
+              })}
+              <br />
+              {t("diag.rawNode", {
+                name: "charge_behaviour",
+                value: state?.behaviour_raw ?? t("common.notExist"),
+              })}
+              <br />
+              {t("diag.rawNode", {
+                name: "power_now",
+                value: state?.power_now ?? t("common.notExist"),
+              })}
             <br />
             {t("diag.thresholdNode", {
               value: state?.threshold_node ? t("common.exists") : t("common.notExist"),
