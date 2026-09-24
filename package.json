@@ -1,14 +1,24 @@
 {
-  "name": "f1pro-battery-control",
-  "version": "0.5.9",
-  "description": "OneXFly F1 Pro (HX 370) charge mode, bypass charging and charge limit control for Decky Loader on SteamOS.",
+  "name": "f1pro-ec-control",
+  "version": "0.6.11",
+  "description": "OneXFly F1 Pro (HX 370) charge mode, bypass charging, charge limit and fan control for Decky Loader on SteamOS.",
   "type": "module",
   "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Phioly/F1Pro-EC-Control.git"
+  },
+  "homepage": "https://github.com/Phioly/F1Pro-EC-Control",
+  "bugs": {
+    "url": "https://github.com/Phioly/F1Pro-EC-Control/issues"
+  },
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/test_display.mjs"
+    "test": "node scripts/run-tests.mjs display",
+    "test:backend": "node scripts/run-tests.mjs backend",
+    "test:all": "node scripts/run-tests.mjs all"
   },
   "license": "MIT",
   "devDependencies": {

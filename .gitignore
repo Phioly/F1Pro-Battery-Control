@@ -1,0 +1,25 @@
+# 依赖与构建缓存
+node_modules/
+.rollup.cache/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 变异验证的工作目录（内含 main.py.orig 等备份，只用于本地验证）
+.mut/
+
+# 说明：
+# dist/ 需要**入库** —— 安装 ZIP 直接分发 dist/index.js，
+# 用户不需要自己 npm install / npm run build。
+#
+# tests/ 需要**入库** —— 源码仓库提供 `npm test` 与
+# `python tests/test_backend.py` 两套离线测试。
+# 但 tests/ 不会被打进发布 ZIP（见仓库根 package.py 的 EXCLUDE_DIRS），
+# 所以从 ZIP 解压出来的目录里直接跑 `npm test` 会找不到模块，
+# 这是有意为之：ZIP 是给掌机安装用的，不是给开发用的。
+#
+# assets/ 需要**入库** —— plugin.json 的 publish.image 指向
+# GitHub raw 链接（.../main/assets/plugin.png），仓库里必须有这张图才会显示。
+# 它同样不进发布 ZIP（ZIP 是给掌机安装的，界面不读这个文件）。
+# 所以 assets/ 不能写进本文件。

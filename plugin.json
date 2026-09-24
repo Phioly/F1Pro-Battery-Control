@@ -1,11 +1,11 @@
 {
-  "name": "F1 Pro Battery Control",
-  "author": "F1 Pro Battery Control",
+  "name": "F1Pro EC Control",
+  "author": "Phioly",
   "flags": ["root"],
   "api_version": 1,
   "publish": {
-    "tags": ["battery", "one-x-fly", "f1-pro", "steam-os", "root"],
-    "description": "OneXFly F1 Pro (HX 370) charge mode, bypass charging and charge limit control on SteamOS.",
-    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/decky-plugin-template"
+    "tags": ["battery", "fan", "onexplayer", "one-x-fly", "f1-pro", "steam-os", "root"],
+    "description": "OneXFly F1 Pro (HX 370) charge mode, bypass charging, charge limit and fan control on SteamOS.",
+    "image": "https://raw.githubusercontent.com/Phioly/F1Pro-EC-Control/main/assets/plugin.png"
   }
 }
