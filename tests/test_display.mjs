@@ -64,11 +64,28 @@ function pickOrNull(pattern, label) {
   return match ? match[0] : "";
 }
 
-// statusName 的映射表（去掉 TS 的参数类型标注）
-const statusNameDecl = pick(
-  /const statusName =[\s\S]*?\n\n/,
-  "statusName 映射",
-).replace("value?: string", "value");
+/**
+ * 把 TS 的类型标注剥成合法 JS。
+ *
+ * 只做**这一处**需要的两件事：去掉参数的可选标记与参数/返回值的类型注解。
+ * 刻意写得窄，避免把对象字面量里的 `:` 也误伤。
+ */
+function stripTypes(code) {
+  return code
+    .replace(/\(\s*(\w+)\?:\s*[\w<>\[\]{}| ,]+\s*\)/, "($1)")
+    .replace(/\)\s*:\s*[\w<>\[\]{}| ,]+\s*=>/g, ") =>");
+}
+
+// statusName 的映射表（去掉 TS 的类型标注）。它现在依赖 STATUS_KEYS，
+// 所以把那张键表也一并抽出来，否则 statusName 会在求值时报未定义。
+const statusKeysDecl = pick(
+  /const STATUS_KEYS: Record<string, MessageKey> = \{[\s\S]*?\n\};/,
+  "STATUS_KEYS 键表",
+).replace(/: Record<string, MessageKey>/, "");
+
+const statusNameDecl = stripTypes(
+  pick(/const statusName =[\s\S]*?\n\n/, "statusName 映射"),
+);
 
 // 状态判定链：onAdapter / adapterLive → supplyOnly → flowing → watts
 const decls = [
@@ -77,11 +94,46 @@ const decls = [
   pick(/const supplyOnly =[^;]*;/, "supplyOnly 判定"),
   pick(/const flowing =[^;]*;/, "flowing 判定"),
   pick(/const watts =[\s\S]*?;/, "watts 计算"),
+  // 状态行的三段拼装（summaryStatus / limitText / batterySummary）。
+  // 这几段现在走 `t()` 取文案，所以下面会注入一个用**真实中文表**驱动的 t()。
+  pick(/const summaryStatus =[\s\S]*?;/, "summaryStatus 拼装"),
+  pick(/const limitText =[\s\S]*?;/, "limitText 拼装"),
+  pick(/const batterySummary =[\s\S]*?;/, "batterySummary 拼装"),
 ];
 
-// 状态行里真正渲染的那段表达式（取自 JSX）
-const labelExpr = 'supplyOnly ? "供电中" : statusName(state?.status)';
-if (!source.includes(`{${labelExpr}}`)) {
+/**
+ * 从 src/i18n/zh-CN.ts 里读出真实的中文文案表。
+ *
+ * 这里**不复制**文案内容，而是解析真实文件：文案一旦被改动（或键名打错、
+ * 漏了占位符），下面的断言会立刻变红，和抽取 JSX 表达式是同一个思路。
+ * 只在"中文表里缺这条"时报错——那正是要被守住的失败模式。
+ */
+const zhTablePath = join(here, "..", "src", "i18n", "zh-CN.ts");
+const zhSource = readFileSync(zhTablePath, "utf-8").replace(/\r\n/g, "\n");
+const ZH = {};
+for (const match of zhSource.matchAll(/"([\w.]+)":\s*"((?:[^"\\]|\\.)*)"/g)) {
+  ZH[match[1]] = match[2].replace(/\\"/g, '"');
+}
+
+/** 与 src/i18n/keys.ts 的 format() 同构：替换 `{name}` 占位符。 */
+function formatZh(template, values) {
+  return template.replace(/\{(\w+)\}/g, (whole, name) =>
+    Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : whole,
+  );
+}
+
+/** 测试用的 t()：只认中文本，缺键直接抛出（避免静默走英文表掩盖漏译）。 */
+function t(key, values) {
+  const template = ZH[key];
+  if (template === undefined) {
+    throw new Error(`中文文案表缺少键「${key}」（src/i18n/zh-CN.ts）`);
+  }
+  return formatZh(template, values ?? {});
+}
+
+// 状态行里真正渲染的那段表达式（取自 JSX）。用 `batterySummary` 这个中间变量
+// 而不是直接抄 JSX 文本，是因为它就是"最终那一行文本"的唯一来源。
+if (!/\{batterySummary\}/.test(source)) {
   throw new Error("无法从 JSX 中定位状态行表达式，显示规则可能已被改写。");
 }
 
@@ -89,11 +141,14 @@ const build = new Function(
   "state",
   "active",
   "acOnline",
-  `${statusNameDecl}\n${decls.join("\n")}
+  "thresholdValue",
+  "t",
+  `${statusKeysDecl}\n${statusNameDecl}\n${decls.join("\n")}
    return {
-     label: ${labelExpr},
+     label: summaryStatus,
      watts,
      supplyOnly,
+     summary: batterySummary,
    };`,
 );
 
@@ -104,9 +159,10 @@ function line({ status, watts, active = "auto", acOnline = true, threshold = 100
     power_watts: watts,
     ac_online: acOnline,
   };
-  const result = build(state, active, acOnline);
-  const wattPart = result.watts ? ` · ${result.watts}` : "";
-  return `${result.label}${wattPart} · 上限 ${threshold}%`;
+  const result = build(state, active, acOnline, threshold, t);
+  // 返回**界面真正渲染的那一行**，不再手工拼装：
+  // 手工拼装等于把"拼装规则"复制一份到测试里，实现改了测试却照样绿。
+  return result.summary;
 }
 
 let passed = 0;
@@ -362,22 +418,38 @@ check(
   true,
 );
 
-// 6. 控制方式必须来自后端的 manual 字段，不能自己比 pwm_enable。
-// 先断言"没有真的写比较"，再对真实表达式求值——只靠 includes 会在
-// 表达式被换成等价写法时漏判。
+// 6. 控制方式必须来自后端的字段，不能自己比 pwm_enable。
+//
+// v0.6.12 起这段文案由后端随 `get_status` 下发（`pwm_enable_label`），
+// 前端只负责套一层括号渲染 —— 这样"读回值 → 手动/自动"的判定只有一处实现，
+// 且有 i18n（后端按界面语言给中文或英文）。断言因此分成两步：
+//   ① 前端不得自己比较 pwm_enable；
+//   ② 渲染必须取自后端字段，且**字段缺失时输出空串**（不能硬编码兜底文案，
+//      否则后端一旦不再下发，界面会显示一个可能过期的旧结论）。
 check(
   "前端没有自行比较 pwm_enable === 1",
   /pwm_enable === 1/.test(source),
   false,
 );
-const diagExpr = pickExpr(
-  /\{(fan\?\.manual \? "（手动 PWM）" : "（EC 自动控温）")\}/,
+// 主页那一行控制方式**必须无条件取自后端下发的 `pwm_enable_label`**，
+// 不能再自己 `fan?.manual ? ... : ...` —— 后者等于把"读回值 → 手动/自动"
+// 这套判定在前端重算一遍，两处实现迟早会不一致（而且前端算不出 i18n）。
+// 注意这条只针对**主页渲染的那一处**：诊断区块里的 manual 展示是另一回事，
+// 所以断言限定在从 `pwm_enable_label` 取值的表达式上。
+const labelExpr = pickExpr(
+  /\{(fan\?\.pwm_enable_label \? `（\$\{fan\.pwm_enable_label\}）` : "")}/,
   "主页风扇控制方式表达式",
 );
-const controlLabel = new Function("fan", `return ${diagExpr};`);
-check("手动满速（读回 0，后端 manual=true）→ 仍显示手动", controlLabel({ manual: true }), "（手动 PWM）");
-check("EC 自动（读回 2，后端 manual=false）→ 显示自动", controlLabel({ manual: false }), "（EC 自动控温）");
-// 反向验证：如果自己比 == 1，满速读回 0 就会误报自动——这正是要避免的。
+check(
+  "主页控制方式不依赖 manual 字段（只信后端下发的标签）",
+  /manual|pwm_enable(?!_label)/.test(labelExpr),
+  false,
+);
+const controlLabel = new Function("fan", `return ${labelExpr};`);
+check("后端下发手动 → 原样渲染", controlLabel({ pwm_enable_label: "手动 PWM" }), "（手动 PWM）");
+check("后端下发自动 → 原样渲染", controlLabel({ pwm_enable_label: "EC 自动" }), "（EC 自动）");
+check("后端未下发 → 不渲染任何东西", controlLabel({}), "");
+// 反向验证：这正是"前端自己按读回值判断"的写法，满速读回 0 时会误报自动。
 const wrongLabel = new Function("enable", 'return enable === 1 ? "（手动 PWM）" : "（EC 自动控温）";');
 check("（对照）自行比较 === 1 在满速读回 0 时会误报", wrongLabel(0), "（EC 自动控温）");
 
@@ -496,8 +568,9 @@ check(
 );
 // 选中项要有可辨识的标记，否则用户看不出当前是哪个模式。
 check(
-  "当前模式在按钮上标出",
-  /fan\?\.mode === mode/.test(quickList) && /✓/.test(quickList),
+  "当前模式在按钮上标出（用 checked 模板，不硬编码勾号）",
+  /fan\?\.mode === mode/.test(quickList) &&
+    /t\("battery\.checked", \{ label: fanModeLabel\(mode\) \}\)/.test(quickList),
   true,
 );
 // **布局回归守卫**：不得再退回网格。网格是超宽/重叠的来源。
@@ -536,12 +609,12 @@ check(
 );
 check(
   "子页面直接以「自定义风扇曲线」开头（返回按钮之后）",
-  /← 返回[\s\S]*?title="自定义风扇曲线"/.test(fanView),
+  /t\("fan\.back"\)[\s\S]*?title=\{t\("fan\.curveSection"\)\}/.test(fanView),
   true,
 );
 check(
   "保存按钮文案为「保存为自定义并应用」",
-  /保存为自定义并应用/.test(fanView),
+  /t\("fan\.saveAndApply"\)/.test(fanView),
   true,
 );
 
@@ -592,7 +665,7 @@ check(
 );
 check(
   "「还原默认曲线」在预设区块内",
-  /title="曲线预设"[\s\S]*?restoreSeedCurve/.test(fanView),
+  /title=\{t\("fan\.presetSection"\)\}[\s\S]*?restoreSeedCurve/.test(fanView),
   true,
 );
 
@@ -727,8 +800,11 @@ check(
 // 11. 风扇不可用时主页降级成一行原因，不摆一排点不动的按钮。
 // 区块边界要一直锚到下一个顶层 PanelSection，否则会切掉后半段
 // （第一版就是这么漏掉"主页显示转速"的，变异验证时才发现是空转）。
+//
+// 锚点用 i18n **键名**而不是中文标题：文案现在活在 zh-CN.ts / en-US.ts 里，
+// 界面文字随时可能改（而且英文版本来就不同），但键名是稳定标识。
 const mainFanSection = pick(
-  /<PanelSection title="风扇">[\s\S]*?\n      <\/PanelSection>\n\n      <PanelSection title="设置">/,
+  /<PanelSection title=\{t\("fan\.section"\)\}>[\s\S]*?\n      <\/PanelSection>\n\n      <PanelSection title=\{t\("settings\.section"\)\}>/,
   "主页风扇区块",
 );
 check(
@@ -1309,6 +1385,11 @@ if (saveCurveOnlyBody !== null) {
       refreshFan: async () => {
         events.push("refreshFan()");
       },
+      // saveCurve 全程用 `t()` 取文案。**必须注入**：不注入的话
+      // `t is not defined` 会被它自己的 catch 抓住、变成一个"看起来正常"
+      // 的错误字符串，于是"留下可见原因"那条断言就空转了
+      // （实测 curveError 曾是字面量 "t is not defined"）。
+      t,
     };
     const names = Object.keys(env);
     const fn = new Function(...names, toRunnable(saveCurveOnlyBody, "saveCurve"));
@@ -1326,9 +1407,11 @@ if (saveCurveOnlyBody !== null) {
   check(
     "切模式失败时要留下可见的原因（不能只是按钮静默变灰）"
       + `（curveError=${JSON.stringify(failedSwitch.state.curveError)}）`,
-    typeof failedSwitch.state.curveError === "string"
-      && failedSwitch.state.curveError.length > 0,
-    true,
+    // 不写成"是个非空字符串"：那样任何一条无关错误都能骗过它
+    // （实测曾因环境缺 `t` 而拿到字面量 "t is not defined"）。
+    // 断言必须指向**这一处**真正该给出的文案。
+    failedSwitch.state.curveError,
+    ZH["error.curveSavedSwitchFailed"],
   );
 
   const okSwitch = await runSaveCurve({ modeSwitchFails: false });
@@ -1424,6 +1507,11 @@ if (changeFanModeBody !== null) {
       },
       fanProfiles: { profiles: { balanced: preset } },
       FAN_CURVE_POINTS: 5,
+      // `changeFanMode` 现在通过 `t()` 取提示文案，测试环境必须提供它 ——
+      // 否则函数一进失败分支就 `ReferenceError: t is not defined`，
+      // 那会被误读成"实现有问题"。注入真实的 zh 表驱动的 t()，
+      // 顺带让文案键写错（漏译）时立刻暴露。
+      t,
       applyFan: async (result) => (result.ok ? null : (result.error ?? "失败")),
       setFanMode: async () =>
         rpcOk ? { ok: true, data: { mode: "balanced" } } : { ok: false, error: "RPC 失败" },
@@ -1491,6 +1579,9 @@ if (tickBody !== null) {
       curveTouched: { current: false },
       fanProfiles: null,
       FAN_CURVE_POINTS: 5,
+      // tick 里 `t("error.readBattery")` / `t("error.readState")` 取的是
+      // 真实 zh 表，注入后既让函数能跑，也顺带验证这两个键确实存在。
+      t,
     };
     const names = Object.keys(env);
     // tick 体里引用的 `cancelled` / `timer` / `setTimeout` / `REFRESH_INTERVAL_MS`
@@ -1546,6 +1637,108 @@ if (tickBody !== null) {
       + `（序列 ${normal.log.join(" -> ")}）`,
     normal.log.join(" -> "),
     "getStatus -> apply -> getFanStatus -> setFan -> setFanError",
+  );
+}
+
+/* ---------------------------------------------------------------- 双语 i18n */
+
+console.log("\n=== 双语文案（i18n）===");
+
+// 直接 import 真实的 i18n 模块（纯函数、不依赖 React），
+// 这样测的就是运行时真正会执行的那份代码。
+const i18n = await import(pathToFileURL(join(here, "..", "src", "i18n", "index.ts")).href)
+  .catch(() => null);
+
+if (i18n === null) {
+  // .ts 不能在裸 node 里 import（需要 tsc / 构建）。退化成**解析真实源文件**，
+  // 仍然不复制逻辑：用正则把三张表和判定规则读出来再求值。
+  const keysSrc = readFileSync(join(here, "..", "src", "i18n", "keys.ts"), "utf-8");
+  const idxSrc = readFileSync(join(here, "..", "src", "i18n", "index.ts"), "utf-8");
+
+  // CHINESE_LOCALES 名单（真值表）
+  const listMatch = idxSrc.match(/const CHINESE_LOCALES = \[([\s\S]*?)\];/);
+  check("能定位到 CHINESE_LOCALES", Boolean(listMatch), true);
+  const chineseLocales = [...listMatch[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  check(
+    "中文名单含 Steam 的简/繁两种写法",
+    String(
+      chineseLocales.includes("schinese") && chineseLocales.includes("tchinese"),
+    ),
+    "true",
+  );
+
+  // 用**抽取出的名单**重建判定，再跑不同输入 —— 与后端 set_locale 同一套语义。
+  const resolve = (locales) => {
+    if (!locales || locales.length === 0) return "en";
+    for (const locale of locales) {
+      if (typeof locale !== "string") continue;
+      if (chineseLocales.includes(locale.trim().toLowerCase())) return "zh";
+    }
+    return "en";
+  };
+  check("schinese → zh", resolve(["schinese"]), "zh");
+  check("tchinese → zh（繁体也走中文）", resolve(["tchinese"]), "zh");
+  check("en → en", resolve(["en"]), "en");
+  check("japanese → en", resolve(["japanese"]), "en");
+  check("koreana → en", resolve(["koreana"]), "en");
+  check("空列表 → en（探测失败退回英文）", resolve([]), "en");
+  check("null → en", resolve(null), "en");
+  check("undefined → en", resolve(undefined), "en");
+  check("大小写不敏感", resolve(["SCHINESE"]), "zh");
+  check("列表里任一为中文即判中文", resolve(["en", "tchinese"]), "zh");
+  check(
+    "非字符串项被跳过、不影响判定",
+    resolve([null, 42, "en"]),
+    "en",
+  );
+  check(
+    "中文名单与后端 _ZH_LANG_HINTS 一致（两侧不能各认一套）",
+    chineseLocales.includes("zh") &&
+      // 后端认前缀，这里认全等；两者对 schinese / tchinese / zh* 的结论必须相同
+      /_ZH_LANG_HINTS[\s\S]*?"zh"[\s\S]*?"schinese"[\s\S]*?"tchinese"/.test(
+        readFileSync(join(here, "..", "main.py"), "utf-8"),
+      ),
+    true,
+  );
+
+  // 两张表：键集一致 + 占位符一致 + 英文表无汉字
+  const parseTable = (name) => {
+    const src = readFileSync(join(here, "..", "src", "i18n", `${name}.ts`), "utf-8");
+    const out = {};
+    for (const m of src.matchAll(/"([\w.]+)":\s*"((?:[^"\\]|\\.)*)"/g)) {
+      out[m[1]] = m[2].replace(/\\"/g, '"');
+    }
+    return out;
+  };
+  const zhFull = parseTable("zh-CN");
+  const enFull = parseTable("en-US");
+  check("中文表非空", Object.keys(zhFull).length > 0, true);
+  check(
+    "中英两表键集一致",
+    JSON.stringify(Object.keys(zhFull).sort()),
+    JSON.stringify(Object.keys(enFull).sort()),
+  );
+  const phMismatch = Object.keys(zhFull).filter((k) => {
+    if (!(k in enFull)) return false;
+    const pz = [...zhFull[k].matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(",");
+    const pe = [...enFull[k].matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(",");
+    return pz !== pe;
+  });
+  check("中英两表占位符一致", JSON.stringify(phMismatch), "[]");
+  const cjkInEn = Object.keys(enFull).filter((k) => /[\u4e00-\u9fff]/.test(enFull[k]));
+  check("英文表里没有残留汉字", JSON.stringify(cjkInEn), "[]");
+  check(
+    "MESSAGE_KEYS 与两张表键集一致",
+    (() => {
+      const m = keysSrc.match(/MESSAGE_KEYS = \[([\s\S]*?)\] as const/);
+      if (!m) return "找不到 MESSAGE_KEYS";
+      const keys = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+      const missZh = keys.filter((k) => !(k in zhFull));
+      const extraZh = Object.keys(zhFull).filter((k) => !keys.includes(k));
+      if (missZh.length || extraZh.length) return `缺=${missZh} 多=${extraZh}`;
+      return "";
+    })(),
+    "",
   );
 }
 

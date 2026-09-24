@@ -59,6 +59,7 @@ EXCLUDE_FILES = {"package.py", "CONTRIBUTING.md"}
 TEXT_FILES = [
     "main.py",
     "README.md",
+    "README.en.md",
     "install.sh",
     "plugin.json",
     "package.json",
@@ -217,6 +218,30 @@ def main() -> int:
             "systemctl restart plugin_loader" in read_text(PLUGIN_DIR / "install.sh"))
     c.check("README 记录了插件日志位置",
             "homebrew/logs" in read_text(readme))
+
+    # ------------------------------------------------- 双语 README 一致性
+    # 互链存在不代表锚点对、也不代表版本号跟着走。这里只守"两份都在、且互链双向"，
+    # 锚点由 .mut/check_readme_anchors.py 负责（它会按 GitHub 规则算 slug）。
+    print("\n=== 双语 README ===")
+    readme_en = PLUGIN_DIR / "README.en.md"
+    c.check("README.en.md 存在", readme_en.is_file())
+    if readme_en.is_file():
+        zh_text = read_text(readme)
+        en_text = read_text(readme_en)
+        c.check("中文 README 链到英文版", "](README.en.md)" in zh_text)
+        c.check("英文 README 链回中文版", "](README.md)" in en_text)
+        # 版本号必须两份一致，否则用户按错版本的说明去装包。
+        version = str(pkg["version"])
+        c.check(
+            f"两份 README 都写了当前版本 v{version}",
+            f"v{version}" in zh_text and f"v{version}" in en_text,
+        )
+        # ZIP 名同理：写错版本用户会去找一个不存在的文件。
+        for label, text in (("中文", zh_text), ("英文", en_text)):
+            c.check(
+                f"{label} README 里的 ZIP 名是当前版本",
+                f"F1ProECControl-v{version}.zip" in text,
+            )
 
     print()
     if not c.ok():

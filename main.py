@@ -50,13 +50,6 @@ class Plugin:
     #: 用户可在界面上选择的模式
     SELECTABLE_MODES = (MODE_AUTO, MODE_AWAKE, MODE_ALWAYS)
 
-    MODE_LABELS = {
-        MODE_AUTO: "正常充电",
-        MODE_AWAKE: "开机旁路",
-        MODE_ALWAYS: "始终旁路",
-        MODE_FORCE_DISCHARGE: "强制放电",
-    }
-
     #: 界面上提供的充电上限档位
     PRESETS = (50, 60, 70, 80, 85, 90, 95)
 
@@ -119,13 +112,350 @@ class Plugin:
         FAN_MODE_CUSTOM,
     )
 
-    FAN_MODE_LABELS = {
-        FAN_MODE_AUTO: "自动",
-        FAN_MODE_QUIET: "静音",
-        FAN_MODE_BALANCED: "均衡",
-        FAN_MODE_PERFORMANCE: "性能",
-        FAN_MODE_CUSTOM: "自定义",
+    # ------------------------------------------------------------ 界面语言
+    #: 当前界面语言。**默认英文**：系统不是简体 / 繁体中文时一律用英文（用户定的规则）。
+    #: 前端挂载时探测 Steam 的界面语言，通过 `set_locale` RPC 推过来。
+    #:
+    #: 注意这是**类属性**：`_normalize_fan_curve` 是 `@classmethod`、只能通过
+    #: `cls._lang` 取值，所以 `set_locale` 也必须写类属性（写实例属性会遮蔽它，
+    #: 曲线校验的报错就会顽固地留在英文）。
+    _lang: str = "en"
+
+    #: 会走中文文案的语言标识。**必须把 Steam 的写法也算进来**：
+    #: 前端把 Steam 客户端语言原样透传，而 Steam 用的是 `schinese` /
+    #: `tchinese`（不是 `zh-CN`）。只认 `zh` 前缀的话，繁体中文用户会被
+    #: 判成英文 —— 界面已经是中文了、后端报错却是英文。
+    #: 前端 `src/i18n/index.ts` 的 `CHINESE_LOCALES` 是同一份名单，改动要同步。
+    _ZH_LANG_HINTS = (
+        "zh",
+        "schinese",
+        "tchinese",
+    )
+
+    #: 充电模式 → 文案键（真正的文案在 `_MSG` 里，按语言取）。
+    _MODE_MSG_KEYS: Dict[str, str] = {
+        MODE_AUTO: "mode.auto",
+        MODE_AWAKE: "mode.inhibitAwake",
+        MODE_ALWAYS: "mode.inhibit",
+        MODE_FORCE_DISCHARGE: "mode.forceDischarge",
     }
+
+    #: 风扇模式 → 文案键。
+    _FAN_MODE_MSG_KEYS: Dict[str, str] = {
+        FAN_MODE_AUTO: "fan.mode.auto",
+        FAN_MODE_QUIET: "fan.mode.quiet",
+        FAN_MODE_BALANCED: "fan.mode.balanced",
+        FAN_MODE_PERFORMANCE: "fan.mode.performance",
+        FAN_MODE_CUSTOM: "fan.mode.custom",
+    }
+
+    #: 全部界面文案（按语言分组）。
+    #:
+    #: 设计约定：
+    #: - 键名 `<区域>.<用途>`，区域含 common / mode / fan / err / restore；
+    #: - **中英两表的键集必须完全一致**、占位符也必须一致（`tests/test_backend.py`
+    #:   的 `test_i18n` 会逐条核对）—— 缺一条就会在界面上显示成另一门语言或键名；
+    #: - 占位符用 `{name}`，由 `_t` 用 `str.format` 替换；
+    #: - **日志不放这里**：日志保持中文（面向开发者、不进界面）。
+    _MSG: Dict[str, Dict[str, str]] = {
+        "zh": {
+            # 充电模式名
+            "mode.auto": "正常充电",
+            "mode.inhibitAwake": "开机旁路",
+            "mode.inhibit": "始终旁路",
+            "mode.forceDischarge": "强制放电",
+            # 风扇模式名
+            "fan.mode.auto": "自动",
+            "fan.mode.quiet": "静音",
+            "fan.mode.balanced": "均衡",
+            "fan.mode.performance": "性能",
+            "fan.mode.custom": "自定义",
+            # 风扇控制权读回标签（随 get_status 下发）
+            "fan.control.manual": "手动 PWM",
+            "fan.control.auto": "EC 自动",
+            "fan.control.unknown": "未知（{value}）",
+            # 电池节点
+            "err.noBatteryNode": (
+                "未找到支持充电控制的电池节点"
+                "（需要 /sys/class/power_supply/BAT*/charge_behaviour）"
+            ),
+            # 通用错误包装
+            # 措辞里显式点出 `_root` 是**错的**（写成 `_root` 会被 Decky 降权，
+            # 于是所有 sysfs 写入 EACCES 而界面看起来一切正常）。
+            # `package.py` 的过时建议扫描会检查这一点：**不要**在提到它的行里
+            # 省略这句纠正说明（阴性标记词表见 package.py 的 CORRECTION_MARKERS）。
+            "err.noPermission": (
+                "没有权限写入{what}节点；请确认 plugin.json 的 flags 包含 \"root\""
+                "（不是 _root），且插件由 Decky 加载。"
+                "当前 uid={uid}，写 sysfs 需要 uid 0。"
+            ),
+            "err.writeRejected": "内核拒绝了写入：{exc}",
+            # 充电模式
+            "err.invalidChargeMode": "无效的充电模式：{mode}",
+            "err.noBehaviourNode": "当前内核没有提供 charge_behaviour 节点",
+            "err.modeUnsupported": "当前内核不支持「{label}」；该节点可用值：{available}",
+            "err.modeNotApplied": "写入后状态未生效：期望 {mode}，内核实际返回 {actual}",
+            "err.noneValue": "无",
+            # 充电上限
+            "err.thresholdNotInt": "充电上限必须是整数",
+            "err.thresholdRange": (
+                "充电上限必须在 {min}%–{max}% 之间，或使用 {disabled}% 解除限制"
+            ),
+            "err.noThresholdNode": "当前内核没有提供 charge_control_end_threshold 节点",
+            "err.thresholdUnreadable": (
+                "已写入 {value}%，但此节点不可读，无法确认是否生效（若设备行为正确可继续使用）"
+            ),
+            "err.thresholdAdjusted": "内核将上限调整为 {actual}%，没有接受 {value}%",
+            # 风扇门禁
+            "err.fanGate": (
+                "无法确认风扇驱动是 oxpec（电池节点没有 charge_behaviour / 充电上限）："
+                "不同驱动的 pwm1_enable 取值含义不同，为避免把 EC 置于手动满速，风扇控制已禁用"
+            ),
+            "err.fanNodesMissing": "未找到 hwmon「{temp}」或「{controller}」及其风扇属性节点",
+            # 曲线校验
+            "err.curvePointCount": "曲线必须恰好包含 {count} 个节点",
+            "err.curvePointPair": "每个曲线节点必须包含「温度」和「PWM」两个值",
+            "err.curvePointInt": "曲线节点的温度与 PWM 必须是整数",
+            "err.curveTempRange": "温度必须在 {min}–{max}°C 之间",
+            "err.curvePwmRange": "PWM 必须在 {min}–{max} 之间",
+            "err.curveNotIncreasing": "曲线节点的温度必须严格递增（每个节点都要比前一个更高）",
+            # 风扇模式切换
+            "err.invalidFanMode": "无效的风扇模式：{mode}",
+            "err.fanHandoverUnconfirmed": "交还 EC 自动控制后未确认生效",
+            "err.fanManualUnconfirmed": "切换手动 PWM 控制后未确认生效",
+            "err.fanUnloading": "插件正在卸载，本次转换已取消",
+            "err.fanThreadStartFailed": "控制线程启动失败（旧线程未退出）",
+            # 启动恢复报告
+            "restore.fanEcAuto": "风扇已确认处于 EC 自动控制",
+            "restore.fanHandoverUnconfirmed": "风扇交还 EC 后未确认生效",
+            "restore.fanModeRestored": "风扇模式已恢复为「{label}」",
+            "restore.fanManualUnconfirmed": "风扇切换为手动控制后未确认生效（目标「{label}」）",
+            "restore.autoOff": "启动自动恢复已关闭",
+            "restore.batteryMissing": "未找到电池节点：{exc}",
+            "restore.noThresholdNode": "内核无 charge_control_end_threshold，跳过上限恢复",
+            "restore.thresholdRestored": "充电上限已恢复为 {value}%",
+            "restore.thresholdUnconfirmed": "充电上限恢复后未确认生效（目标 {value}%）",
+            "restore.noBehaviourNode": "内核无 charge_behaviour，跳过模式恢复",
+            "restore.modeUnsupported": "内核不支持「{label}」，模式未恢复",
+            "restore.modeRestored": "充电模式已恢复为「{label}」",
+            "restore.modeUnconfirmed": "充电模式恢复后未确认生效（目标「{label}」）",
+            "restore.nothing": "没有需要恢复的设置",
+            # 电池探测
+            "err.batteryProbe": "未找到支持充电控制的电池节点",
+            # 风扇不可用的其他原因（`_fan_node` / `_fan_temp_node` 抛出）
+            "err.fanControllerNodeMissing": "未找到 F1 Pro 风扇控制节点（oxp_ec）",
+            "err.fanTempNodeMissing": "未找到 CPU 温度传感器（k10temp）",
+            # 风扇控制循环里会返回给界面的错误
+            "err.fanPwmUnreadable": "PWM 写入后无法读取确认",
+            "err.fanPwmMismatch": "PWM 写入后读回 {actual}，与目标 {target} 不符",
+            "err.fanTempUnreadable": "无法读取 CPU 温度",
+            "err.fanReclaimUnconfirmed": "重新取得手动控制权后未确认生效",
+            # 名词片段：供 `err.restoreFailed` 拼装，也让错误里能带上"哪个环节"
+            "common.chargeMode": "充电模式",
+            "common.chargeLimit": "充电上限",
+            "common.fanControl": "风扇控制",
+            "common.chargeControl": "电池控制",
+            "err.restoreFailed": "{area}恢复失败：{detail}",
+        },
+        "en": {
+            # mode names
+            "mode.auto": "Normal charging",
+            "mode.inhibitAwake": "Bypass while on",
+            "mode.inhibit": "Bypass always",
+            "mode.forceDischarge": "Force discharge",
+            "fan.mode.auto": "Auto",
+            "fan.mode.quiet": "Quiet",
+            "fan.mode.balanced": "Balanced",
+            "fan.mode.performance": "Performance",
+            "fan.mode.custom": "Custom",
+            # fan control authority read-back labels (sent with get_status)
+            "fan.control.manual": "Manual PWM",
+            "fan.control.auto": "EC auto",
+            "fan.control.unknown": "Unknown ({value})",
+            # battery node
+            "err.noBatteryNode": (
+                "No battery node supporting charge control was found "
+                "(expected /sys/class/power_supply/BAT*/charge_behaviour)"
+            ),
+            # generic error wrapping
+            # 措辞里显式点出 `_root` 是**错的**（写成 `_root` 会被 Decky 降权，
+            # 于是所有 sysfs 写入 EACCES 而界面看起来一切正常）。
+            # `package.py` 的过时建议扫描会检查这一点：**不要**在提到它的行里
+            # 省略这句纠正说明（阴性标记词表见 package.py 的 CORRECTION_MARKERS）。
+            "err.noPermission": (
+                "Not permitted to write the {what} node. Make sure plugin.json's "
+                "flags contains \"root\" (never write \"_root\") and that the "
+                "plugin is loaded by Decky. Current uid={uid}; writing sysfs "
+                "requires uid 0."
+            ),
+            "err.writeRejected": "The kernel rejected the write: {exc}",
+            # charge mode
+            "err.invalidChargeMode": "Invalid charge mode: {mode}",
+            "err.noBehaviourNode": "The kernel does not provide a charge_behaviour node",
+            "err.modeUnsupported": (
+                "This kernel does not support \"{label}\"; "
+                "values available on this node: {available}"
+            ),
+            "err.modeNotApplied": (
+                "The state did not take effect after writing: expected {mode}, "
+                "kernel reported {actual}"
+            ),
+            "err.noneValue": "none",
+            # charge limit
+            "err.thresholdNotInt": "The charge limit must be an integer",
+            "err.thresholdRange": (
+                "The charge limit must be between {min}% and {max}%, "
+                "or use {disabled}% to remove the limit"
+            ),
+            "err.noThresholdNode": (
+                "The kernel does not provide a charge_control_end_threshold node"
+            ),
+            "err.thresholdUnreadable": (
+                "Wrote {value}%, but this node is not readable so the change could "
+                "not be confirmed (safe to keep using it if the device behaves "
+                "correctly)"
+            ),
+            "err.thresholdAdjusted": (
+                "The kernel adjusted the limit to {actual}% and did not accept {value}%"
+            ),
+            # fan gate
+            "err.fanGate": (
+                "Could not confirm the fan driver is oxpec (the battery node has no "
+                "charge_behaviour / charge limit): pwm1_enable means different things "
+                "on different drivers, so fan control is disabled to avoid leaving the "
+                "EC in manual full speed"
+            ),
+            "err.fanNodesMissing": (
+                "Neither hwmon \"{temp}\" nor \"{controller}\" (with its fan "
+                "attribute nodes) was found"
+            ),
+            # curve validation
+            "err.curvePointCount": "The curve must contain exactly {count} points",
+            "err.curvePointPair": (
+                "Every curve point must contain both a temperature and a PWM value"
+            ),
+            "err.curvePointInt": (
+                "Curve temperatures and PWM values must be integers"
+            ),
+            "err.curveTempRange": (
+                "Temperature must be between {min} and {max} °C"
+            ),
+            "err.curvePwmRange": "PWM must be between {min} and {max}",
+            "err.curveNotIncreasing": (
+                "Curve temperatures must strictly increase (each point higher than "
+                "the previous one)"
+            ),
+            # fan mode switching
+            "err.invalidFanMode": "Invalid fan mode: {mode}",
+            "err.fanHandoverUnconfirmed": (
+                "Handing the fan back to EC auto control could not be confirmed"
+            ),
+            "err.fanManualUnconfirmed": (
+                "Switching to manual PWM control could not be confirmed"
+            ),
+            "err.fanUnloading": "The plugin is unloading; this transition was cancelled",
+            "err.fanThreadStartFailed": (
+                "Failed to start the control thread (the previous thread did not exit)"
+            ),
+            # startup restore report
+            "restore.fanEcAuto": "Fan confirmed under EC auto control",
+            "restore.fanHandoverUnconfirmed": (
+                "Fan handover to the EC could not be confirmed"
+            ),
+            "restore.fanModeRestored": "Fan mode restored to \"{label}\"",
+            "restore.fanManualUnconfirmed": (
+                "Fan switch to manual control could not be confirmed (target \"{label}\")"
+            ),
+            "restore.autoOff": "Auto restore on startup is off",
+            "restore.batteryMissing": "Battery node not found: {exc}",
+            "restore.noThresholdNode": (
+                "Kernel has no charge_control_end_threshold; skipping limit restore"
+            ),
+            "restore.thresholdRestored": "Charge limit restored to {value}%",
+            "restore.thresholdUnconfirmed": (
+                "Charge limit restore could not be confirmed (target {value}%)"
+            ),
+            "restore.noBehaviourNode": "Kernel has no charge_behaviour; skipping mode restore",
+            "restore.modeUnsupported": "Kernel does not support \"{label}\"; mode not restored",
+            "restore.modeRestored": "Charge mode restored to \"{label}\"",
+            "restore.modeUnconfirmed": (
+                "Charge mode restore could not be confirmed (target \"{label}\")"
+            ),
+            "restore.nothing": "Nothing to restore",
+            # battery probing
+            "err.batteryProbe": "No battery node supporting charge control was found",
+            # other fan-unavailable reasons
+            "err.fanControllerNodeMissing": "F1 Pro fan control node (oxp_ec) not found",
+            "err.fanTempNodeMissing": "CPU temperature sensor (k10temp) not found",
+            # fan control loop errors surfaced to the UI
+            "err.fanPwmUnreadable": "Could not read back the PWM value after writing",
+            "err.fanPwmMismatch": "PWM read back as {actual} after writing, expected {target}",
+            "err.fanTempUnreadable": "Could not read the CPU temperature",
+            "err.fanReclaimUnconfirmed": "Reclaiming manual control could not be confirmed",
+            # noun fragments used to compose "err.restoreFailed"
+            "common.chargeMode": "Charge mode",
+            "common.chargeLimit": "Charge limit",
+            "common.fanControl": "Fan control",
+            "common.chargeControl": "Battery control",
+            "err.restoreFailed": "{area} restore failed: {detail}",
+        },
+    }
+
+    def _t(self, key: str, **values: Any) -> str:
+        """按当前界面语言取文案。
+
+        `key` 缺失或该语言下没有这条时**返回键名本身** —— 与前端 `translate()`
+        一致，界面上一眼能看出漏了哪条，比显示空串好排查。
+        """
+        table = self._MSG.get(self._lang) or self._MSG["en"]
+        template = table.get(key)
+        if template is None:
+            # 当前语言缺这条时退回英文，再缺才给键名。
+            template = self._MSG["en"].get(key)
+        if template is None:
+            return key
+        try:
+            return template.format(**values)
+        except (KeyError, IndexError, ValueError):
+            return template
+
+    @classmethod
+    def _t_static(cls, key: str, **values: Any) -> str:
+        """供 `@classmethod` 使用的取文案入口（不用实例即可调用）。
+
+        `_normalize_fan_curve` 是类方法、没有 `self`，但校验文案又必须跟随
+        界面语言 —— 语言状态是类级属性 `_lang`，所以这里直接读 `cls._lang`。
+        语义（缺键返回键名、缺语言退回英文）与 `_t` 完全一致。
+        """
+        lang = getattr(cls, "_lang", "en")
+        table = cls._MSG.get(lang) or cls._MSG["en"]
+        template = table.get(key)
+        if template is None:
+            template = cls._MSG["en"].get(key)
+        if template is None:
+            return key
+        try:
+            return template.format(**values)
+        except (KeyError, IndexError, ValueError):
+            return template
+
+    def _mode_label(self, mode: str) -> str:
+        """充电模式 → 当前语言下的显示名（未知模式原样透出）。"""
+        key = self._MODE_MSG_KEYS.get(mode)
+        return self._t(key) if key else mode
+
+    def _fan_mode_label(self, mode: str) -> str:
+        """风扇模式 → 当前语言下的显示名（未知模式原样透出）。"""
+        key = self._FAN_MODE_MSG_KEYS.get(mode)
+        return self._t(key) if key else mode
+
+    def _mode_labels(self) -> Dict[str, str]:
+        """全部充电模式的本地化名称表（随 `get_status` 一起下发给前端）。"""
+        return {mode: self._mode_label(mode) for mode in self._MODE_MSG_KEYS}
+
+    def _fan_mode_labels(self) -> Dict[str, str]:
+        """全部风扇模式的本地化名称表。"""
+        return {mode: self._fan_mode_label(mode) for mode in self._FAN_MODE_MSG_KEYS}
 
     #: 可选曲线：五个 [温度 °C, PWM] 节点，写进 EC 前会线性插值。
     #: oxp_fly 板型的 EC PWM 范围就是 [0-255]，驱动不做缩放（其余机型才缩放）。
@@ -338,12 +668,12 @@ class Plugin:
 
     def _fan_node(self, filename: str) -> str:
         if not self.fan_controller_path and not self._refresh_fan_nodes():
-            raise RuntimeError("未找到 F1 Pro 风扇控制节点（oxp_ec）")
+            raise RuntimeError(self._t("err.fanControllerNodeMissing"))
         return os.path.join(self.fan_controller_path, filename)
 
     def _fan_temp_node(self) -> str:
         if not self.fan_temp_path and not self._refresh_fan_nodes():
-            raise RuntimeError("未找到 CPU 温度传感器（k10temp）")
+            raise RuntimeError(self._t("err.fanTempNodeMissing"))
         return os.path.join(self.fan_temp_path, self.FAN_TEMP_FILE)
 
     def _fan_driver_ok(self) -> bool:
@@ -368,15 +698,12 @@ class Plugin:
     def _fan_unavailable_reason(self) -> Optional[str]:
         """风扇控制不可用的原因；可用时返回 None。"""
         if not self._fan_driver_ok():
-            return (
-                "无法确认风扇驱动是 oxpec（电池节点没有 charge_behaviour / "
-                "充电上限）：不同驱动的 pwm1_enable 取值含义不同，"
-                "为避免把 EC 置于手动满速，风扇控制已禁用"
-            )
+            return self._t("err.fanGate")
         if not self._refresh_fan_nodes():
-            return (
-                f"未找到 hwmon「{self.FAN_TEMP_SENSOR}」或「{self.FAN_CONTROLLER}」"
-                "及其风扇属性节点"
+            return self._t(
+                "err.fanNodesMissing",
+                temp=self.FAN_TEMP_SENSOR,
+                controller=self.FAN_CONTROLLER,
             )
         return None
 
@@ -424,12 +751,12 @@ class Plugin:
 
         status: Dict[str, Any] = {
             "mode": mode,
-            "mode_label": self.FAN_MODE_LABELS.get(mode, mode),
+            "mode_label": self._fan_mode_label(mode),
             "controller": self.FAN_CONTROLLER,
             "temp_sensor": self.FAN_TEMP_SENSOR,
             "safety_temp": self.FAN_SAFETY_TEMP,
             "modes": list(self.FAN_MODES),
-            "mode_labels": dict(self.FAN_MODE_LABELS),
+            "mode_labels": self._fan_mode_labels(),
         }
 
         # 节点不可用不是"操作失败"，而是这台机器没有这个能力：
@@ -453,7 +780,13 @@ class Plugin:
                 "pwm": self._parse_int(self._read_or_none(self._fan_node(self.FAN_PWM_FILE))),
                 "pwm_enable": enable,
                 "pwm_enable_label": (
-                    "手动 PWM" if manual else ("EC 自动" if auto else f"未知（{enable}）")
+                    self._t("fan.control.manual")
+                    if manual
+                    else (
+                        self._t("fan.control.auto")
+                        if auto
+                        else self._t("fan.control.unknown", value=enable)
+                    )
                 ),
                 "manual": manual,
                 "auto": auto,
@@ -537,10 +870,7 @@ class Plugin:
         if refresh or not self.battery_path:
             found = self._find_battery()
             if not found:
-                raise RuntimeError(
-                    "未找到支持充电控制的电池节点"
-                    "（需要 /sys/class/power_supply/BAT*/charge_behaviour）"
-                )
+                raise RuntimeError(self._t("err.noBatteryNode"))
             self.battery_path = found
         return self.battery_path
 
@@ -630,7 +960,7 @@ class Plugin:
         state["saved_threshold"] = settings.get("threshold")
         state["saved_mode"] = settings.get("mode")
         state["restore_report"] = list(self._restore_report)
-        state["mode_labels"] = dict(self.MODE_LABELS)
+        state["mode_labels"] = self._mode_labels()
         state["presets"] = list(self.PRESETS)
         state["threshold_disabled_value"] = self.THRESHOLD_DISABLED
         return state
@@ -672,15 +1002,17 @@ class Plugin:
         self._save_settings(settings)
 
     # ------------------------------------------------------------- 错误信息
-    def _error_message(self, exc: Exception, what: str = "电池控制") -> str:
+    def _error_message(self, exc: Exception, what: Optional[str] = None) -> str:
+        # `what` 需要在**当前语言**下取值，而语言是运行期才定的 —— 所以默认值
+        # 不能写成中文字面量，只能留 `None`、进来再解析。
+        if what is None:
+            what = self._t("common.chargeControl")
         if isinstance(exc, PermissionError):
-            return (
-                f"没有权限写入{what}节点；请确认 plugin.json 的 flags 包含 \"root\""
-                "（不是 _root），且插件由 Decky 加载。"
-                f"当前 uid={self._current_uid()}，写 sysfs 需要 uid 0。"
+            return self._t(
+                "err.noPermission", what=what, uid=self._current_uid()
             )
         if isinstance(exc, OSError):
-            return f"内核拒绝了写入：{exc}"
+            return self._t("err.writeRejected", exc=exc)
         return str(exc)
 
     @staticmethod
@@ -708,18 +1040,20 @@ class Plugin:
     def _set_charge_mode_sync(self, mode: str) -> Dict[str, Any]:
         allowed = set(self.SELECTABLE_MODES) | {self.MODE_FORCE_DISCHARGE}
         if mode not in allowed:
-            return {"ok": False, "error": f"无效的充电模式：{mode}"}
+            return {"ok": False, "error": self._t("err.invalidChargeMode", mode=mode)}
         try:
             path = self._battery()
             node = os.path.join(path, self.BEHAVIOUR_FILE)
             if not self._node_exists(node):
-                raise RuntimeError("当前内核没有提供 charge_behaviour 节点")
+                raise RuntimeError(self._t("err.noBehaviourNode"))
 
             supported = self._parse_behaviours(self._read(node))["supported"]
             if mode not in supported:
-                label = self.MODE_LABELS.get(mode, mode)
-                available = " ".join(supported) if supported else "无"
-                raise RuntimeError(f"当前内核不支持「{label}」；该节点可用值：{available}")
+                label = self._mode_label(mode)
+                available = " ".join(supported) if supported else self._t("err.noneValue")
+                raise RuntimeError(
+                    self._t("err.modeUnsupported", label=label, available=available)
+                )
 
             self._write_node(node, mode)
 
@@ -742,7 +1076,7 @@ class Plugin:
         try:
             value = int(value)
         except (TypeError, ValueError):
-            return {"ok": False, "error": "充电上限必须是整数"}
+            return {"ok": False, "error": self._t("err.thresholdNotInt")}
         return await asyncio.to_thread(self._set_threshold_sync, value)
 
     def _set_threshold_sync(self, value: int) -> Dict[str, Any]:
@@ -751,14 +1085,18 @@ class Plugin:
         ):
             return {
                 "ok": False,
-                "error": f"充电上限必须在 {self.MIN_THRESHOLD}%–{self.MAX_THRESHOLD}% 之间，"
-                f"或使用 {self.THRESHOLD_DISABLED}% 解除限制",
+                "error": self._t(
+                    "err.thresholdRange",
+                    min=self.MIN_THRESHOLD,
+                    max=self.MAX_THRESHOLD,
+                    disabled=self.THRESHOLD_DISABLED,
+                ),
             }
         try:
             path = self._battery()
             node = os.path.join(path, self.THRESHOLD_FILE)
             if not self._node_exists(node):
-                raise RuntimeError("当前内核没有提供 charge_control_end_threshold 节点")
+                raise RuntimeError(self._t("err.noThresholdNode"))
 
             self._write_node(node, str(value))
 
@@ -769,10 +1107,11 @@ class Plugin:
                 actual = self._parse_int(self._read_or_none(node))
                 if actual is None:
                     raise RuntimeError(
-                        f"已写入 {value}%，但此节点不可读，无法确认是否生效"
-                        "（若设备行为正确可继续使用）"
+                        self._t("err.thresholdUnreadable", value=value)
                     )
-                raise RuntimeError(f"内核将上限调整为 {actual}%，没有接受 {value}%")
+                raise RuntimeError(
+                    self._t("err.thresholdAdjusted", actual=actual, value=value)
+                )
 
             # 100% 表示「不限制」，不需要在启动时恢复。
             self._update_setting(
@@ -790,6 +1129,25 @@ class Plugin:
 
         return await asyncio.to_thread(_apply)
 
+    async def set_locale(self, lang: str) -> Dict[str, Any]:
+        """记录界面语言（由前端挂载时探测后告知）。
+
+        只接受中文 / 英文两类，其余（含取不到）一律落回 ``"en"`` ——
+        不要因为前端传了个没见过的值就让后端文案变成键名。
+
+        **必须写类属性、不能用 `self._lang = ...`**：后者会创建一个同名**实例**
+        属性去遮蔽类属性，而 `_normalize_fan_curve` 是 `@classmethod`、
+        只能通过 `cls._lang` 取值 —— 走 `self` 赋值的话，用户切到中文后
+        曲线校验的报错仍然吐英文（离线已复现）。语言本来就是"这套插件安装"
+        的全局状态（Decky 只会有一个实例），放类上语义也对。
+        """
+        normalized = str(lang).strip().lower()
+        Plugin._lang = (
+            "zh" if normalized.startswith(self._ZH_LANG_HINTS) else "en"
+        )
+        decky.logger.info(f"F1Pro EC Control: 界面语言设为 {Plugin._lang}")
+        return {"ok": True}
+
     # --------------------------------------------------------- 风扇曲线计算
     @classmethod
     def _normalize_fan_curve(cls, curve: Any) -> List[List[int]]:
@@ -804,24 +1162,34 @@ class Plugin:
         等于悄悄改乱用户的设置。规则前后端必须一致：乱序就报错。
         """
         if not isinstance(curve, (list, tuple)) or len(curve) != cls.FAN_CURVE_POINTS:
-            raise ValueError(f"曲线必须恰好包含 {cls.FAN_CURVE_POINTS} 个节点")
+            raise ValueError(
+                cls._t_static("err.curvePointCount", count=cls.FAN_CURVE_POINTS)
+            )
 
         points: List[List[int]] = []
         for point in curve:
             if not isinstance(point, (list, tuple)) or len(point) != 2:
-                raise ValueError("每个曲线节点必须包含「温度」和「PWM」两个值")
+                raise ValueError(cls._t_static("err.curvePointPair"))
             try:
                 temperature = int(point[0])
                 pwm = int(point[1])
             except (TypeError, ValueError):
-                raise ValueError("曲线节点的温度与 PWM 必须是整数") from None
+                raise ValueError(cls._t_static("err.curvePointInt")) from None
             if not cls.FAN_MIN_TEMP <= temperature <= cls.FAN_MAX_TEMP:
                 raise ValueError(
-                    f"温度必须在 {cls.FAN_MIN_TEMP}–{cls.FAN_MAX_TEMP}°C 之间"
+                    cls._t_static(
+                        "err.curveTempRange",
+                        min=cls.FAN_MIN_TEMP,
+                        max=cls.FAN_MAX_TEMP,
+                    )
                 )
             if not cls.FAN_MIN_PWM <= pwm <= cls.FAN_MAX_PWM:
                 raise ValueError(
-                    f"PWM 必须在 {cls.FAN_MIN_PWM}–{cls.FAN_MAX_PWM} 之间"
+                    cls._t_static(
+                        "err.curvePwmRange",
+                        min=cls.FAN_MIN_PWM,
+                        max=cls.FAN_MAX_PWM,
+                    )
                 )
             points.append([temperature, pwm])
 
@@ -829,7 +1197,7 @@ class Plugin:
         # 注意这里检查的是**原始顺序**，与前端 validateCurve 的规则完全一致。
         for index in range(1, len(points)):
             if points[index][0] <= points[index - 1][0]:
-                raise ValueError("曲线节点的温度必须严格递增（每个节点都要比前一个更高）")
+                raise ValueError(cls._t_static("err.curveNotIncreasing"))
         return points
 
     @classmethod
@@ -1023,11 +1391,11 @@ class Plugin:
             # 界面会显示"手动"、温度也在读，但 PWM 根本没生效。
             # 确认失败就抛异常，交给调用方走 fail-safe。
             if not self._wait_for(self._fan_is_manual):
-                raise RuntimeError("重新取得手动控制权后未确认生效")
+                raise RuntimeError(self._t("err.fanReclaimUnconfirmed"))
 
         temperature = self._read_fan_temperature()
         if temperature is None:
-            raise RuntimeError("无法读取 CPU 温度")
+            raise RuntimeError(self._t("err.fanTempUnreadable"))
 
         # 安全保护优先于任何曲线：达到 85°C 一律满速。
         is_safety_override = temperature >= self.FAN_SAFETY_TEMP
@@ -1068,9 +1436,11 @@ class Plugin:
         # 读回不可信时这个判断基础就没了。
         actual = self._parse_int(self._read_or_none(self._fan_node(self.FAN_PWM_FILE)))
         if actual is None:
-            raise RuntimeError("PWM 写入后无法读取确认")
+            raise RuntimeError(self._t("err.fanPwmUnreadable"))
         if actual != target_pwm:
-            raise RuntimeError(f"PWM 写入后读回 {actual}，与目标 {target_pwm} 不符")
+            raise RuntimeError(
+                self._t("err.fanPwmMismatch", actual=actual, target=target_pwm)
+            )
         return actual
 
     def _fan_acquire_transition_or_stop(self) -> bool:
@@ -1222,7 +1592,7 @@ class Plugin:
             }
         except Exception as exc:  # noqa: BLE001
             decky.logger.error(f"F1Pro Fan: 读取状态失败：{exc}")
-            return {"ok": False, "error": self._error_message(exc, "风扇控制")}
+            return {"ok": False, "error": self._error_message(exc, self._t("common.fanControl"))}
 
     async def get_fan_profiles(self) -> Dict[str, Any]:
         return {
@@ -1241,7 +1611,7 @@ class Plugin:
                     list(point) for point in self._get_fan_curve(self.FAN_MODE_CUSTOM)
                 ],
                 "modes": list(self.FAN_MODES),
-                "mode_labels": dict(self.FAN_MODE_LABELS),
+                "mode_labels": self._fan_mode_labels(),
                 "constraints": {
                     "min_temp": self.FAN_MIN_TEMP,
                     "max_temp": self.FAN_MAX_TEMP,
@@ -1258,7 +1628,7 @@ class Plugin:
 
     def _set_fan_mode_sync(self, mode: str) -> Dict[str, Any]:
         if mode not in self.FAN_MODES:
-            return {"ok": False, "error": f"无效的风扇模式：{mode}"}
+            return {"ok": False, "error": self._t("err.invalidFanMode", mode=mode)}
         # **整段转换都在转换锁里**：停止线程 → 取/交控制权 → 写 enable →
         # 写 pwm1 → 读回验证 → 更新设置 → 启线程。
         # 只锁 _start_fan_controller() 是不够的——两个 RPC 并发时会互相穿插，
@@ -1271,18 +1641,18 @@ class Plugin:
 
                 if mode == self.FAN_MODE_AUTO:
                     if not self._fan_handover_to_ec():
-                        raise RuntimeError("交还 EC 自动控制后未确认生效")
+                        raise RuntimeError(self._t("err.fanHandoverUnconfirmed"))
                     self._update_setting("fan_mode", self.FAN_MODE_AUTO)
                 else:
                     if not self._fan_apply_manual(mode):
-                        raise RuntimeError("切换手动 PWM 控制后未确认生效")
+                        raise RuntimeError(self._t("err.fanManualUnconfirmed"))
 
                 # **卸载优先于"成功"**：上面整段转换期间插件可能已经开始卸载
                 # （卸载取锁超时后走"仍尝试交还 EC"的分支并返回）。
                 # 此刻若照常返回 ok=True，界面会显示成功、设置里留着手动模式，
                 # 而 EC 其实已经被交还 —— 探针 probe_f 复现的正是这个交错。
                 if self._fan_unloading:
-                    raise RuntimeError("插件正在卸载，本次转换已取消")
+                    raise RuntimeError(self._t("err.fanUnloading"))
 
                 return {"ok": True, "data": self._read_fan_status_sync()}
             except Exception as exc:  # noqa: BLE001
@@ -1292,7 +1662,7 @@ class Plugin:
                 # 否则下次启动还会照着手动模式再恢复一次。
                 self._fan_fail_safe()
                 self._update_setting("fan_mode", self.FAN_MODE_AUTO)
-                return {"ok": False, "error": self._error_message(exc, "风扇控制")}
+                return {"ok": False, "error": self._error_message(exc, self._t("common.fanControl"))}
             finally:
                 self._fan_transition_active = False
 
@@ -1326,9 +1696,9 @@ class Plugin:
                     # （离线探针 .mut/repro_fan_leftovers.py 的 probe_g 复现过）。
                     if self._fan_unloading:
                         decky.logger.error("F1Pro Fan: 插件正在卸载，放弃启动控制线程")
-                        raise RuntimeError("插件正在卸载，本次转换已取消")
+                        raise RuntimeError(self._t("err.fanUnloading"))
                     if not self._start_fan_controller():
-                        raise RuntimeError("控制线程启动失败（旧线程未退出）")
+                        raise RuntimeError(self._t("err.fanThreadStartFailed"))
 
                 return {"ok": True, "data": {"curve": normalized}}
             except Exception as exc:  # noqa: BLE001
@@ -1337,7 +1707,7 @@ class Plugin:
                 decky.logger.error(f"F1Pro Fan: 应用自定义曲线失败：{exc}")
                 self._fan_fail_safe()
                 self._update_setting("fan_mode", self.FAN_MODE_AUTO)
-                return {"ok": False, "error": self._error_message(exc, "风扇控制")}
+                return {"ok": False, "error": self._error_message(exc, self._t("common.fanControl"))}
             finally:
                 self._fan_transition_active = False
 
@@ -1443,25 +1813,31 @@ class Plugin:
             # 分不清是真本来就自动、还是刚纠正了一个滞后读数，但两种情况
             # 的结论一样——现在确实处于 EC 自动控制，这不影响用户判断。
             if self._fan_handover_to_ec():
-                report.append("风扇已确认处于 EC 自动控制")
+                report.append(self._t("restore.fanEcAuto"))
             else:
-                report.append("风扇交还 EC 后未确认生效")
+                report.append(self._t("restore.fanHandoverUnconfirmed"))
             return
 
-        label = self.FAN_MODE_LABELS.get(saved, saved)
+        label = self._fan_mode_label(saved)
         try:
             if self._fan_apply_manual(saved):
-                report.append(f"风扇模式已恢复为「{label}」")
+                report.append(self._t("restore.fanModeRestored", label=label))
             else:
                 # 注意这里是**已经写入了 pwm1_enable=1** 之后才失败的
                 # （_fan_apply_manual 先写 enable、再 _wait_for 确认）。
                 # 也就是 EC 已经在手动模式、而控制线程没起来——风扇挂在
                 # 一个不跟温度走、也没有 85°C 保护的手动 PWM 上。
                 # 所以必须兜底，不能只写一行日志。
-                report.append(f"风扇切换为手动控制后未确认生效（目标「{label}」）")
+                report.append(self._t("restore.fanManualUnconfirmed", label=label))
                 self._fan_fail_safe()
         except Exception as exc:  # noqa: BLE001
-            report.append(f"风扇模式恢复失败：{self._error_message(exc, '风扇控制')}")
+            report.append(
+                self._t(
+                    "err.restoreFailed",
+                    area=self._t("common.fanControl"),
+                    detail=self._error_message(exc, self._t("common.fanControl")),
+                )
+            )
             self._fan_fail_safe()
 
     def _restore_sync(self) -> None:
@@ -1471,18 +1847,24 @@ class Plugin:
         try:
             self._restore_fan_report(report)
         except Exception as exc:  # noqa: BLE001
-            report.append(f"风扇状态检查失败：{self._error_message(exc, '风扇控制')}")
+            report.append(
+                self._t(
+                    "err.restoreFailed",
+                    area=self._t("common.fanControl"),
+                    detail=self._error_message(exc, self._t("common.fanControl")),
+                )
+            )
 
         settings = self._load_settings()
         if not settings.get("auto_restore", True):
-            report.append("启动自动恢复已关闭")
+            report.append(self._t("restore.autoOff"))
             self._restore_report = report
             return
 
         try:
             path = self._battery()
         except Exception as exc:  # noqa: BLE001
-            report.append(f"未找到电池节点：{exc}")
+            report.append(self._t("restore.batteryMissing", exc=exc))
             self._restore_report = report
             return
 
@@ -1492,44 +1874,66 @@ class Plugin:
         ):
             node = os.path.join(path, self.THRESHOLD_FILE)
             if not self._node_exists(node):
-                report.append("内核无 charge_control_end_threshold，跳过上限恢复")
+                report.append(self._t("restore.noThresholdNode"))
             else:
                 try:
                     self._write_node(node, str(saved_threshold))
                     if self._wait_for(
                         lambda: self._parse_int(self._read_or_none(node)) == saved_threshold
                     ):
-                        report.append(f"充电上限已恢复为 {saved_threshold}%")
+                        report.append(
+                            self._t("restore.thresholdRestored", value=saved_threshold)
+                        )
                     else:
-                        report.append(f"充电上限恢复后未确认生效（目标 {saved_threshold}%）")
+                        report.append(
+                            self._t(
+                                "restore.thresholdUnconfirmed", value=saved_threshold
+                            )
+                        )
                 except Exception as exc:  # noqa: BLE001
-                    report.append(f"充电上限恢复失败：{self._error_message(exc)}")
+                    report.append(
+                        self._t(
+                            "err.restoreFailed",
+                            area=self._t("common.chargeLimit"),
+                            detail=self._error_message(exc),
+                        )
+                    )
 
         saved_mode = settings.get("mode")
         if isinstance(saved_mode, str) and saved_mode in self.SELECTABLE_MODES:
             node = os.path.join(path, self.BEHAVIOUR_FILE)
-            label = self.MODE_LABELS.get(saved_mode, saved_mode)
+            label = self._mode_label(saved_mode)
             if not self._node_exists(node):
-                report.append("内核无 charge_behaviour，跳过模式恢复")
+                report.append(self._t("restore.noBehaviourNode"))
             else:
                 try:
                     supported = self._parse_behaviours(self._read(node))["supported"]
                     if saved_mode not in supported:
-                        report.append(f"内核不支持「{label}」，模式未恢复")
+                        report.append(self._t("restore.modeUnsupported", label=label))
                     else:
                         self._write_node(node, saved_mode)
                         if self._wait_for(
                             lambda: self._parse_behaviours(self._read_or_none(node))["active"]
                             == saved_mode
                         ):
-                            report.append(f"充电模式已恢复为「{label}」")
+                            report.append(
+                                self._t("restore.modeRestored", label=label)
+                            )
                         else:
-                            report.append(f"充电模式恢复后未确认生效（目标「{label}」）")
+                            report.append(
+                                self._t("restore.modeUnconfirmed", label=label)
+                            )
                 except Exception as exc:  # noqa: BLE001
-                    report.append(f"充电模式恢复失败：{self._error_message(exc)}")
+                    report.append(
+                        self._t(
+                            "err.restoreFailed",
+                            area=self._t("common.chargeMode"),
+                            detail=self._error_message(exc),
+                        )
+                    )
 
         if not report:
-            report.append("没有需要恢复的设置")
+            report.append(self._t("restore.nothing"))
         self._restore_report = report
 
     # ------------------------------------------------------------ Decky 生命周期
@@ -1543,7 +1947,7 @@ class Plugin:
 
         if not path:
             self.battery_path = None
-            self._restore_report = ["未找到支持充电控制的电池节点"]
+            self._restore_report = [self._t("err.batteryProbe")]
             decky.logger.warning("F1Pro EC Control: 未找到支持充电控制的电池节点")
             return
 

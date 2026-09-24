@@ -10,6 +10,8 @@ import {
 import { callable, definePlugin, toaster } from "@decky/api";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { createTranslator, type MessageKey } from "./i18n";
+
 /* ------------------------------------------------------------------ 类型 */
 
 interface BehaviourState {
@@ -113,6 +115,26 @@ const setChargeMode = callable<[mode: string], Result>("set_charge_mode");
 const setChargeThreshold = callable<[value: number], Result>("set_charge_threshold");
 const setAutoRestore = callable<[enabled: boolean], Result>("set_auto_restore");
 
+/**
+ * 把探测到的界面语言告知后端。
+ *
+ * 后端返回的用户可见文案（错误信息、启动恢复报告、风扇不可用原因）也必须是
+ * 双语的，但它没有任何办法知道 Steam 的界面语言 —— 那套 LocalizationManager
+ * 只活在渲染进程里。所以由前端在挂载时探测一次、调用 `set_locale` 推送过去。
+ *
+ * 为什么加载与刷新代码里再调一次：Decky 重新加载插件时**不会**重新挂载
+ * 已存在的组件树（只重跑后端的 `_main`），此时 `_lang` 会退回类属性默认值
+ * `"en"`；不过前端此时会重新加载并重新执行模块顶层的这段代码，所以这里
+ * 补一次即可对齐。失败静默忽略：拿不到语言时后端退回英文，不该因此报错。
+ */
+const setLocale = callable<[lang: string], Result>("set_locale");
+
+let localePushed: Promise<unknown> | null = null;
+const pushLocale = (lang: string): void => {
+  if (localePushed) return;
+  localePushed = Promise.resolve(setLocale(lang)).catch(() => undefined);
+};
+
 const getFanStatus = callable<[], FanResult>("get_fan_status");
 const getFanProfiles = callable<[], FanProfilesResult>("get_fan_profiles");
 const setFanMode = callable<[mode: string], FanResult>("set_fan_mode");
@@ -122,32 +144,34 @@ const setFanCustomCurve = callable<[curve: number[][]], FanCurveResult>(
 
 /* -------------------------------------------------------------- 辅助函数 */
 
-const MODE_LABELS: Record<string, string> = {
-  auto: "正常充电",
-  "inhibit-charge-awake": "开机旁路",
-  "inhibit-charge": "始终旁路",
-  "force-discharge": "强制放电",
+/**
+ * 充电模式 → 文案键。
+ *
+ * 之前这里是 `Record<string, string>` 的中文字面量；现在只存**键**，
+ * 实际文案在渲染时按当前语言取（见 `src/i18n/`）。
+ */
+const MODE_LABEL_KEYS: Record<string, MessageKey> = {
+  auto: "charge.mode.auto",
+  "inhibit-charge-awake": "charge.mode.inhibitAwake",
+  "inhibit-charge": "charge.mode.inhibit",
+  "force-discharge": "charge.mode.forceDischarge",
 };
 
-const MODE_DESCRIPTIONS: Record<string, string> = {
-  auto: "正常向电池充电，并遵循下方设置的充电上限。",
-  "inhibit-charge-awake": "运行时停止充电、直接由电源供电；设备睡眠并接电时恢复充电。",
-  "inhibit-charge": "运行和睡眠状态都停止充电，适合长期插电使用。",
-  "force-discharge": "接电状态下强制放电。",
+const MODE_DESC_KEYS: Record<string, MessageKey> = {
+  auto: "charge.mode.desc.auto",
+  "inhibit-charge-awake": "charge.mode.desc.inhibitAwake",
+  "inhibit-charge": "charge.mode.desc.inhibit",
+  "force-discharge": "charge.mode.desc.forceDischarge",
 };
 
-const statusName = (value?: string) =>
-  ({
-    Charging: "充电中",
-    Discharging: "放电中",
-    Full: "已充满",
-    "Not charging": "未充电",
-    Unknown: "未知",
-  }[value ?? ""] ??
-    value ??
-    "--");
-
-const modeLabel = (mode: string | null) => (mode ? MODE_LABELS[mode] ?? mode : "未知");
+/** 内核 status 字符串 → 文案键。 */
+const STATUS_KEYS: Record<string, MessageKey> = {
+  Charging: "battery.status.charging",
+  Discharging: "battery.status.discharging",
+  Full: "battery.status.full",
+  "Not charging": "battery.status.notCharging",
+  Unknown: "common.unknown",
+};
 
 const REFRESH_INTERVAL_MS = 5000;
 
@@ -201,18 +225,18 @@ const BatteryIcon = () => (
 const FAN_CURVE_POINTS = 5;
 
 /**
- * 主页面与曲线页共用的模式短名。
+ * 主页面与曲线页共用的模式**文案键**。
  *
  * 后端也给了 `fan.mode_labels`，但那是给状态行走的文案；这里的短名要配按钮，
  * 所以单独定义一份。两边都保留是有意的——不要为了"减少重复"而让按钮文案
- * 跟着后端走，那会让中文/英文混排不受前端控制。
+ * 跟着后端走，那会让语言选择不受前端控制（后端不知道用户界面语言）。
  */
-const FAN_MODE_LABELS: Record<string, string> = {
-  auto: "自动",
-  quiet: "静音",
-  balanced: "均衡",
-  performance: "性能",
-  custom: "自定义",
+const FAN_MODE_LABEL_KEYS: Record<string, MessageKey> = {
+  auto: "fan.mode.auto",
+  quiet: "fan.mode.quiet",
+  balanced: "fan.mode.balanced",
+  performance: "fan.mode.performance",
+  custom: "fan.mode.custom",
 };
 
 /**
@@ -316,6 +340,48 @@ function scrollPanelToTop(node: HTMLElement | null): void {
 /* -------------------------------------------------------------- 主界面 */
 
 function Content() {
+  /**
+   * 当前语言与取文案函数。
+   *
+   * 用 `useState` 的**惰性初始化**：语言在组件挂载那一刻定型（探测一次），
+   * 保证首帧就有正确文案 —— 若放在 `useEffect` 里再设，第一帧会闪一下英文。
+   *
+   * 不在运行中切换语言：Steam 的语言设置改了要重启客户端才生效，
+   * 插件跟随重启后的挂载即可，不必监听变更（也就不会引入监听开销）。
+   */
+  const [{ t, lang }] = useState(() => createTranslator());
+
+  /**
+   * 把语言推给后端一次（见模块顶层 `pushLocale` 的说明）。
+   *
+   * 不能放进下面那个轮询 `useEffect`：那里每 5 秒跑一次、还会在 `view`
+   * 变化时重建，而语言一辈子只需要同步一次。`pushLocale` 自带幂等保护，
+   * 即便 React 的 StrictMode 把组件挂载两次也只发一次请求。
+   */
+  useEffect(() => {
+    pushLocale(lang);
+  }, [lang]);
+
+  /** 按当前语言取充电模式名；未知模式原样透出（比显示"未知"更有诊断价值）。 */
+  const modeLabel = (mode: string | null): string => {
+    if (!mode) return t("common.unknown");
+    const key = MODE_LABEL_KEYS[mode];
+    return key ? t(key) : mode;
+  };
+
+  /** 内核 status → 本地化名称。 */
+  const statusName = (value?: string): string => {
+    const key = STATUS_KEYS[value ?? ""];
+    if (key) return t(key);
+    return value ?? "--";
+  };
+
+  /** 风扇模式短名（按钮 / 状态行共用）。 */
+  const fanModeLabel = (mode: string): string => {
+    const key = FAN_MODE_LABEL_KEYS[mode];
+    return key ? t(key) : mode;
+  };
+
   const [state, setState] = useState<BatteryState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -328,6 +394,26 @@ function Content() {
   const [curve, setCurve] = useState<number[][]>(FAN_CURVE_SEED);
   const [curveDirty, setCurveDirty] = useState(false);
   const [curveError, setCurveError] = useState<string | null>(null);
+
+  /**
+   * 当前生效的充电模式（`charge_behaviour.active`）。
+   *
+   * 必须定义在 `state` 之后：这几个本地化辅助函数都依赖它，
+   * 放在 `useState` 之前会踩暂时性死区（`TS2448`）。
+   */
+  const active = state?.charge_behaviour.active ?? null;
+
+  /**
+   * 充电模式按钮文案：当前生效的那一项加 `✓ ` 前缀。
+   *
+   * 勾号走 `battery.checked` 模板而不是直接拼 `"✓ " + label`——
+   * 这样"标记符号要不要带空格、用哪个符号"都能按语言分别控制，
+   * 语言表里也不会留下硬编码的标点。
+   */
+  const chargeModeButton = (mode: string, key: MessageKey): string => {
+    const label = t(key);
+    return active === mode ? t("battery.checked", { label }) : label;
+  };
 
   /** 插件自身那层 DOM，用来向上寻找真正在滚动的祖先。 */
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -353,7 +439,7 @@ function Content() {
   };
 
   const refresh = async () => {
-    apply(await getStatus(), "读取电池状态失败");
+    apply(await getStatus(), t("error.readBattery"));
   };
 
   /** 拉一次风扇状态；不可用时只记录原因，不当作操作失败弹通知。 */
@@ -364,7 +450,7 @@ function Content() {
       setFanError(result.data.available ? null : (result.data.reason ?? null));
       return result.data;
     }
-    setFanError(result.error ?? "读取风扇状态失败");
+    setFanError(result.error ?? t("error.readFan"));
     return null;
   };
 
@@ -407,14 +493,14 @@ function Content() {
       if (cancelled) return;
       try {
         const batteryResult = await getStatus();
-        if (!cancelled) apply(batteryResult, "读取电池状态失败");
+        if (!cancelled) apply(batteryResult, t("error.readBattery"));
       } catch (error) {
         // **必须自己捕获**：RPC 层的 Promise 一旦被拒绝，就会变成一次
         // 未处理的 rejection；而且下面读风扇状态的代码会被整段跳过 ——
         // 电池读失败不该把风扇状态一起拖下水（两者是独立的 RPC）。
         // 注意只记原因、不弹通知：轮询每 5 秒一次，EC 卡顿时会刷屏。
         if (!cancelled) {
-          setFanError(error instanceof Error ? error.message : "读取状态失败");
+          setFanError(error instanceof Error ? error.message : t("error.readState"));
         }
       }
       try {
@@ -433,17 +519,17 @@ function Content() {
             }
           }
         } else {
-          setFanError(fanResult.error ?? "读取风扇状态失败");
+          setFanError(fanResult.error ?? t("error.readFan"));
         }
       } catch (error) {
         // 同上：吞掉异常但不吞掉续排（续排由下面的 finally 负责）。
         if (!cancelled) {
-          setFanError(error instanceof Error ? error.message : "读取风扇状态失败");
+          setFanError(error instanceof Error ? error.message : t("error.readFan"));
         }
       } finally {
         // 必须放在 finally 里：中途抛错（RPC 层异常）时若不排下一次，
         // 轮询会**静默停死**，界面停在旧数据上再也不刷新。
-        // 用 finally 保证无论成功失败都续上，与 setInterval 的语义对齐。
+        // 用 finally 保证无论成功失败都续上，与递归 setTimeout 的语义一致。
         if (!cancelled) {
           timer = setTimeout(tick, REFRESH_INTERVAL_MS);
         }
@@ -473,10 +559,10 @@ function Content() {
   const changeMode = async (mode: string) => {
     setBusy(true);
     try {
-      const problem = apply(await setChargeMode(mode), "切换充电模式失败");
+      const problem = apply(await setChargeMode(mode), t("error.switchChargeMode"));
       if (problem) notifyFailure(problem);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "切换充电模式失败";
+      const message = error instanceof Error ? error.message : t("error.switchChargeMode");
       setError(message);
       notifyFailure(message);
     } finally {
@@ -487,10 +573,10 @@ function Content() {
   const changeThreshold = async (value: number) => {
     setBusy(true);
     try {
-      const problem = apply(await setChargeThreshold(value), "设置充电上限失败");
+      const problem = apply(await setChargeThreshold(value), t("error.setChargeLimit"));
       if (problem) notifyFailure(problem);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "设置充电上限失败";
+      const message = error instanceof Error ? error.message : t("error.setChargeLimit");
       setError(message);
       notifyFailure(message);
     } finally {
@@ -501,10 +587,10 @@ function Content() {
   const changeAutoRestore = async (enabled: boolean) => {
     setBusy(true);
     try {
-      const problem = apply(await setAutoRestore(enabled), "保存设置失败");
+      const problem = apply(await setAutoRestore(enabled), t("error.saveSettings"));
       if (problem) notifyFailure(problem);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "保存设置失败";
+      const message = error instanceof Error ? error.message : t("error.saveSettings");
       setError(message);
       notifyFailure(message);
     } finally {
@@ -526,7 +612,7 @@ function Content() {
   const changeFanMode = async (mode: string) => {
     setFanBusy(true);
     try {
-      const problem = await applyFan(await setFanMode(mode), "切换风扇模式失败");
+      const problem = await applyFan(await setFanMode(mode), t("error.switchFanMode"));
       if (problem) {
         notifyFailure(problem);
         return false;
@@ -547,7 +633,7 @@ function Content() {
       }
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "切换风扇模式失败";
+      const message = error instanceof Error ? error.message : t("error.switchFanMode");
       setFanError(message);
       notifyFailure(message);
       return false;
@@ -607,7 +693,7 @@ function Content() {
     const points = curve.map((point) => [...point]);
 
     if (!curveIsStrictlyIncreasing(points)) {
-      const message = "曲线节点的温度必须严格递增（每个节点都要比前一个更高）";
+      const message = t("error.curveNotIncreasing");
       setCurveError(message);
       notifyFailure(message);
       return;
@@ -619,7 +705,7 @@ function Content() {
       const result = await setFanCustomCurve(points);
 
       if (!result.ok || !result.data) {
-        const message = result.error ?? "保存自定义曲线失败";
+        const message = result.error ?? t("error.saveCurve");
         setCurveError(message);
         notifyFailure(message);
         return;
@@ -644,7 +730,7 @@ function Content() {
       if (fan?.mode !== "custom") {
         const applied = await changeFanMode("custom");
         if (!applied) {
-          setCurveError("曲线已保存，但切换为自定义模式失败，尚未在风扇上生效");
+          setCurveError(t("error.curveSavedSwitchFailed"));
           return;
         }
       } else {
@@ -653,7 +739,7 @@ function Content() {
       }
       setCurveDirty(false);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "保存自定义曲线失败";
+      const message = error instanceof Error ? error.message : t("error.saveCurve");
       setCurveError(message);
       notifyFailure(message);
     } finally {
@@ -672,7 +758,7 @@ function Content() {
   const loadPresetCurve = (mode: string) => {
     const preset = fanProfiles?.profiles?.[mode];
     if (!Array.isArray(preset) || preset.length !== FAN_CURVE_POINTS) {
-      notifyFailure(`没有可用的${FAN_MODE_LABELS[mode] ?? mode}曲线`);
+      notifyFailure(t("fan.noCurveForMode", { label: fanModeLabel(mode) }));
       return;
     }
     curveTouched.current = true; // 别让下一次轮询把刚载入的值覆盖掉
@@ -690,7 +776,6 @@ function Content() {
     setCurveDirty(true);
   };
 
-  const active = state?.charge_behaviour.active ?? null;
 
   const thresholdValue = useMemo(() => {
     if (typeof state?.threshold === "number") return state.threshold;
@@ -704,7 +789,10 @@ function Content() {
         label: `${value}%`,
         data: value,
       })),
-      { label: `不限制（充满到 ${THRESHOLD_DISABLED}%）`, data: THRESHOLD_DISABLED },
+      {
+        label: t("battery.noLimitOption", { value: THRESHOLD_DISABLED }),
+        data: THRESHOLD_DISABLED,
+      },
     ],
     [state?.presets],
   );
@@ -721,33 +809,29 @@ function Content() {
 
     // 预设套用**先落到滑杆上**，让用户看清曲线长什么样、还能微调；
     // 真正写进 EC 要等他按「保存为自定义并应用」。
-    const presetButtons: Array<[string, string]> = [
-      ["quiet", "静音"],
-      ["balanced", "均衡"],
-      ["performance", "性能"],
-    ];
+    const presetButtons: string[] = ["quiet", "balanced", "performance"];
 
     return (
       <div ref={rootRef}>
         <PanelSection>
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={() => setView("main")}>
-              ← 返回
+              {t("fan.back")}
             </ButtonItem>
           </PanelSectionRow>
         </PanelSection>
 
         {!available && (
-          <PanelSection title="提示">
+          <PanelSection title={t("common.hint")}>
             <PanelSectionRow>
               <div style={blockStyle}>
-                {fanError ?? "该机型未提供可用的风扇控制节点"}
+                {fanError ?? t("fan.unavailableDefault")}
               </div>
             </PanelSectionRow>
           </PanelSection>
         )}
 
-        <PanelSection title="自定义风扇曲线">
+        <PanelSection title={t("fan.curveSection")}>
           {curve.map((point, index) => {
             // 温度滑杆夹在左右邻居之间，滑不出重复或倒序；
             // 这样"顺序错误"在动手时就不可达，保存时的校验只是兜底。
@@ -757,12 +841,12 @@ function Content() {
                 <div style={{ width: "100%", paddingTop: "4px" }}>
                   <div style={rowStyle}>
                     <span>
-                      节点 {index + 1} · {point[0]}°C
+                      {t("fan.node", { index: index + 1, temp: point[0] })}
                     </span>
                     <span>PWM {point[1]}</span>
                   </div>
                   <SliderField
-                    label={`温度（${bounds.min}–${bounds.max}°C）`}
+                    label={t("fan.tempRange", { min: bounds.min, max: bounds.max })}
                     value={point[0]}
                     min={bounds.min}
                     max={bounds.max}
@@ -792,7 +876,7 @@ function Content() {
               disabled={fanBusy || !available || !curveDirty}
               onClick={saveCurve}
             >
-              保存为自定义并应用
+              {t("fan.saveAndApply")}
             </ButtonItem>
           </PanelSectionRow>
 
@@ -803,15 +887,15 @@ function Content() {
           )}
         </PanelSection>
 
-        <PanelSection title="曲线预设">
-          {presetButtons.map(([mode, label]) => (
+        <PanelSection title={t("fan.presetSection")}>
+          {presetButtons.map((mode) => (
             <PanelSectionRow key={mode}>
               <ButtonItem
                 layout="below"
                 disabled={fanBusy || !available}
                 onClick={() => loadPresetCurve(mode)}
               >
-                应用{label}曲线
+                {t("fan.applyPreset", { label: fanModeLabel(mode) })}
               </ButtonItem>
             </PanelSectionRow>
           ))}
@@ -821,12 +905,12 @@ function Content() {
               disabled={fanBusy || !available || !curveDirty}
               onClick={restoreSeedCurve}
             >
-              还原默认曲线
+              {t("fan.restoreDefault")}
             </ButtonItem>
           </PanelSectionRow>
         </PanelSection>
 
-        <PanelSection title="诊断">
+        <PanelSection title={t("common.diagnostic")}>
           <PanelSectionRow>
             <div
               style={{
@@ -836,23 +920,27 @@ function Content() {
                 opacity: 0.75,
               }}
             >
-              控制器：{fan?.controller ?? "--"}
+              {t("fan.diag.controller", { value: fan?.controller ?? "--" })}
               <br />
-              温度传感器：{fan?.temp_sensor ?? "--"}
+              {t("fan.diag.tempSensor", { value: fan?.temp_sensor ?? "--" })}
               <br />
-              PWM 节点：{fan?.pwm ?? "不存在"}
+              {t("fan.diag.pwmNode", {
+                value: fan?.pwm ?? t("common.notExist"),
+              })}
               <br />
-              pwm1_enable：{fan?.pwm_enable ?? "不存在"}
+              pwm1_enable：{fan?.pwm_enable ?? t("common.notExist")}
               {fan?.pwm_enable_label ? `（${fan.pwm_enable_label}）` : ""}
               <br />
-              控制方式：{fan?.manual ? "手动 PWM" : "EC 自动"}
+              {t("fan.diag.controlMethod", {
+                value: fan?.manual ? t("fan.manual") : t("fan.ecAuto"),
+              })}
               <br />
-              安全阈值：{fan?.safety_temp ?? "--"}°C（达到即满速）
+              {t("fan.diag.safetyTemp", { value: fan?.safety_temp ?? "--" })}
             </div>
           </PanelSectionRow>
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={fanBusy} onClick={refreshFan}>
-              刷新
+              {t("common.refresh")}
             </ButtonItem>
           </PanelSectionRow>
         </PanelSection>
@@ -870,7 +958,7 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={refresh}>
-            重新读取
+            {t("common.reload")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -927,9 +1015,24 @@ function Content() {
       ? `${state.power_watts >= 0 ? "" : "-"}${Math.abs(state.power_watts).toFixed(1)} W`
       : null;
 
+  /**
+   * 状态行文案：`状态 · [瓦数 ·] 上限 N%`。
+   *
+   * 有瓦数时用带 `{watts}` 占位的那条，否则用不带的那条 ——
+   * **不要用字符串拼接空瓦数**（会留下多余的 ` · `）。
+   */
+  const summaryStatus = supplyOnly
+    ? t("battery.status.supplying")
+    : statusName(state?.status);
+  const limitText =
+    typeof thresholdValue === "number" ? `${thresholdValue}%` : t("battery.noLimit");
+  const batterySummary = watts
+    ? t("battery.summary.watts", { status: summaryStatus, watts, limit: limitText })
+    : t("battery.summary", { status: summaryStatus, limit: limitText });
+
   return (
     <div ref={rootRef}>
-      <PanelSection title="电池状态">
+      <PanelSection title={t("battery.section")}>
         <PanelSectionRow>
           <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
             <span>{state?.battery ?? "BAT"}</span>
@@ -938,23 +1041,22 @@ function Content() {
         </PanelSectionRow>
         <PanelSectionRow>
           <div style={{ whiteSpace: "normal", lineHeight: 1.35 }}>
-            {supplyOnly ? "供电中" : statusName(state?.status)}
-            {watts ? ` · ${watts}` : ""} · 上限{" "}
-            {typeof thresholdValue === "number" ? `${thresholdValue}%` : "不限制"}
+            {batterySummary}
             <br />
-            当前模式：<b>{modeLabel(active)}</b>
+            {t("battery.currentMode")}
+            <b>{modeLabel(active)}</b>
           </div>
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="充电模式">
+      <PanelSection title={t("battery.chargeModeSection")}>
         <PanelSectionRow>
           <ButtonItem
             layout="below"
             disabled={busy || !state?.supports_normal}
             onClick={() => changeMode("auto")}
           >
-            {active === "auto" ? "✓ 正常充电" : "正常充电"}
+            {chargeModeButton("auto", "charge.mode.auto")}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -963,7 +1065,7 @@ function Content() {
             disabled={busy || !state?.supports_awake_bypass}
             onClick={() => changeMode("inhibit-charge-awake")}
           >
-            {active === "inhibit-charge-awake" ? "✓ 开机旁路" : "开机旁路"}
+            {chargeModeButton("inhibit-charge-awake", "charge.mode.inhibitAwake")}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -972,20 +1074,20 @@ function Content() {
             disabled={busy || !state?.supports_bypass}
             onClick={() => changeMode("inhibit-charge")}
           >
-            {active === "inhibit-charge" ? "✓ 始终旁路" : "始终旁路"}
+            {chargeModeButton("inhibit-charge", "charge.mode.inhibit")}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <div style={{ whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }}>
-            {MODE_DESCRIPTIONS[active ?? ""] ?? ""}
+            {active && MODE_DESC_KEYS[active] ? t(MODE_DESC_KEYS[active]) : ""}
           </div>
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="充电上限">
+      <PanelSection title={t("battery.limitSection")}>
         <PanelSectionRow>
           <DropdownItem
-            label="停止充电电量"
+            label={t("battery.limitLabel")}
             rgOptions={thresholdOptions}
             selectedOption={thresholdValue ?? state?.threshold_disabled_value ?? 100}
             disabled={busy || !state?.supports_threshold}
@@ -994,7 +1096,7 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="风扇">
+      <PanelSection title={t("fan.section")}>
         {fanAvailable ? (
           <>
             <PanelSectionRow>
@@ -1008,9 +1110,9 @@ function Content() {
             </PanelSectionRow>
             <PanelSectionRow>
               <div style={blockStyle}>
-                当前模式：
-                <b>{FAN_MODE_LABELS[fan?.mode ?? ""] ?? fan?.mode_label ?? "未知"}</b>
-                {fan?.manual ? "（手动 PWM）" : "（EC 自动控温）"}
+                {t("fan.currentMode")}
+                <b>{fan?.mode ? fanModeLabel(fan.mode) : t("common.unknown")}</b>
+                {fan?.manual ? t("fan.manual") : t("fan.ecAuto")}
               </div>
             </PanelSectionRow>
             {/*
@@ -1031,14 +1133,14 @@ function Content() {
                   onClick={() => changeFanMode(mode)}
                 >
                   {fan?.mode === mode
-                    ? `✓ ${FAN_MODE_LABELS[mode]}`
-                    : FAN_MODE_LABELS[mode]}
+                    ? t("battery.checked", { label: fanModeLabel(mode) })
+                    : fanModeLabel(mode)}
                 </ButtonItem>
               </PanelSectionRow>
             ))}
             <PanelSectionRow>
               <ButtonItem layout="below" onClick={() => setView("fan")}>
-                编辑风扇曲线 →
+                {t("fan.editCurve")}
               </ButtonItem>
             </PanelSectionRow>
           </>
@@ -1046,17 +1148,17 @@ function Content() {
           // 不可用时**只留一行原因**，不要摆一排点了没反应的按钮。
           <PanelSectionRow>
             <div style={{ ...blockStyle, opacity: 0.8 }}>
-              {fan?.reason ?? fanError ?? "未检测到 oxpec 风扇控制接口"}
+              {fan?.reason ?? fanError ?? t("fan.unavailableDefault")}
             </div>
           </PanelSectionRow>
         )}
       </PanelSection>
 
-      <PanelSection title="设置">
+      <PanelSection title={t("settings.section")}>
         <PanelSectionRow>
           <ToggleField
-            label="Decky 启动时自动恢复"
-            description="重新应用上次保存的充电模式、充电上限与风扇模式"
+            label={t("settings.autoRestore")}
+            description={t("settings.autoRestoreDesc")}
             checked={state?.auto_restore ?? true}
             disabled={busy}
             onChange={changeAutoRestore}
@@ -1072,14 +1174,14 @@ function Content() {
       </PanelSection>
 
       {error && (
-        <PanelSection title="提示">
+        <PanelSection title={t("common.hint")}>
           <PanelSectionRow>
             <div style={{ whiteSpace: "normal", lineHeight: 1.35 }}>{error}</div>
           </PanelSectionRow>
         </PanelSection>
       )}
 
-      <PanelSection title="诊断">
+      <PanelSection title={t("common.diagnostic")}>
         <PanelSectionRow>
           <div
             style={{
@@ -1090,25 +1192,31 @@ function Content() {
               opacity: 0.75,
             }}
           >
-            {state?.battery_path ?? "未找到电池节点"}
+            {state?.battery_path ?? t("diag.batteryNodeMissing")}
             <br />
-            外接电源: {state?.ac_node ?? "无节点"}
-            {acOnline === null ? "" : acOnline ? " 在线" : " 离线"}
+            {t("diag.ac", { value: state?.ac_node ?? t("diag.acNoNode") })}
+            {acOnline === null ? "" : acOnline ? t("diag.acOnline") : t("diag.acOffline")}
             <br />
-            status: {state?.status ?? "不存在"}
+            status: {state?.status ?? t("common.notExist")}
             <br />
-            charge_behaviour: {state?.behaviour_raw ?? "不存在"}
+            charge_behaviour: {state?.behaviour_raw ?? t("common.notExist")}
             <br />
-            power_now: {state?.power_now ?? "不存在"}
+            power_now: {state?.power_now ?? t("common.notExist")}
             <br />
-            threshold 节点: {state?.threshold_node ? "存在" : "不存在"}
+            {t("diag.thresholdNode", {
+              value: state?.threshold_node ? t("common.exists") : t("common.notExist"),
+            })}
             <br />
-            风扇: {fan?.controller ?? "未检测"}
-            {fan?.available === false ? " · 不可用" : fan?.manual ? " · 手动" : " · EC 自动"}
+            {t("diag.fan", { value: fan?.controller ?? t("diag.fanNotDetected") })}
+            {fan?.available === false
+              ? ` · ${t("diag.fanUnavailable")}`
+              : fan?.manual
+                ? ` · ${t("diag.fanManual")}`
+                : ` · ${t("diag.fanEcAuto")}`}
             {state && !state.supports_awake_bypass ? (
               <>
                 <br />
-                内核未提供 inhibit-charge-awake
+                {t("diag.noAwakeBypass")}
               </>
             ) : null}
           </div>
@@ -1122,7 +1230,7 @@ function Content() {
               refreshFan();
             }}
           >
-            刷新
+            {t("common.refresh")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>

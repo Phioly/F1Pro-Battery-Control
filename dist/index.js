@@ -23,38 +23,359 @@ const definePlugin = (fn) => {
     };
 };
 
+/**
+ * 文案键的**唯一清单**。
+ *
+ * 用法：所有界面文案都必须从这里取键，不要直接写字面量 ——
+ * `zh-CN.ts` 与 `en-US.ts` 都以它为约束（`Record<MessageKey, string>`），
+ * 少一条、多一条都会在 `tsc --noEmit` 阶段报错。
+ *
+ * 命名规则：`<区域>.<用途>`，区域按界面分块（charge / fan / diag / common…）。
+ * 需要插值的键在值里用 `{name}` 占位（见 `format()`）。
+ */
+/**
+ * 把 `{name}` 占位替换成实际值。
+ *
+ * 故意不引入 i18next：Decky 对插件没有官方 i18n（`@decky/ui` 里没有
+ * 任何 translation 导出），而这里只需要"取表 + 填占位"两件事，
+ * 自己实现反而更可控、也更容易离线测试。
+ */
+function format(template, values) {
+    if (!values)
+        return template;
+    return template.replace(/\{(\w+)\}/g, (whole, name) => Object.prototype.hasOwnProperty.call(values, name)
+        ? String(values[name])
+        : whole);
+}
+
+const zhCN = {
+    // ---- 通用 ----
+    "common.unknown": "未知",
+    "common.notAvailable": "无",
+    "common.notExist": "不存在",
+    "common.exists": "存在",
+    "common.refresh": "刷新",
+    "common.reload": "重新读取",
+    "common.hint": "提示",
+    "common.diagnostic": "诊断",
+    // ---- 充电模式 ----
+    "charge.mode.auto": "正常充电",
+    "charge.mode.inhibitAwake": "开机旁路",
+    "charge.mode.inhibit": "始终旁路",
+    "charge.mode.forceDischarge": "强制放电",
+    "charge.mode.desc.auto": "正常向电池充电，并遵循下方设置的充电上限。",
+    "charge.mode.desc.inhibitAwake": "运行时停止充电、直接由电源供电；设备睡眠并接电时恢复充电。",
+    "charge.mode.desc.inhibit": "运行和睡眠状态都停止充电，适合长期插电使用。",
+    "charge.mode.desc.forceDischarge": "接电状态下强制放电。",
+    // ---- 电池状态 ----
+    "battery.section": "电池状态",
+    "battery.status.charging": "充电中",
+    "battery.status.discharging": "放电中",
+    "battery.status.full": "已充满",
+    "battery.status.notCharging": "未充电",
+    "battery.status.supplying": "供电中",
+    "battery.summary": "{status} · 上限 {limit}",
+    "battery.summary.noLimit": "{status} · 上限 不限制",
+    "battery.summary.watts": "{status} · {watts} · 上限 {limit}",
+    "battery.currentMode": "当前模式：",
+    "battery.noLimit": "不限制",
+    "battery.noLimitOption": "不限制（充满到 {value}%）",
+    "battery.chargeModeSection": "充电模式",
+    "battery.limitSection": "充电上限",
+    "battery.limitLabel": "停止充电电量",
+    "battery.checked": "✓ {label}",
+    // ---- 风扇 ----
+    "fan.section": "风扇",
+    "fan.mode.auto": "自动",
+    "fan.mode.quiet": "静音",
+    "fan.mode.balanced": "均衡",
+    "fan.mode.performance": "性能",
+    "fan.mode.custom": "自定义",
+    "fan.currentMode": "当前模式：",
+    "fan.manual": "（手动 PWM）",
+    "fan.ecAuto": "（EC 自动控温）",
+    "fan.editCurve": "编辑风扇曲线 →",
+    "fan.unavailableDefault": "未检测到 oxpec 风扇控制接口",
+    "fan.noCurveForMode": "没有可用的{label}曲线",
+    "fan.curveSection": "自定义风扇曲线",
+    "fan.node": "节点 {index} · {temp}°C",
+    "fan.tempRange": "温度（{min}–{max}°C）",
+    "fan.saveAndApply": "保存为自定义并应用",
+    "fan.presetSection": "曲线预设",
+    "fan.applyPreset": "应用{label}曲线",
+    "fan.restoreDefault": "还原默认曲线",
+    "fan.diag.controller": "控制器：{value}",
+    "fan.diag.tempSensor": "温度传感器：{value}",
+    "fan.diag.pwmNode": "PWM 节点：{value}",
+    "fan.diag.controlMethod": "控制方式：{value}",
+    "fan.diag.safetyTemp": "安全阈值：{value}°C（达到即满速）",
+    "fan.diag.safetyNote": "",
+    "fan.back": "← 返回",
+    // ---- 设置 ----
+    "settings.section": "设置",
+    "settings.autoRestore": "Decky 启动时自动恢复",
+    "settings.autoRestoreDesc": "重新应用上次保存的充电模式、充电上限与风扇模式",
+    // ---- 诊断 ----
+    "diag.section": "诊断",
+    "diag.ac": "外接电源：{value}",
+    "diag.acOnline": "在线",
+    "diag.acOffline": "离线",
+    "diag.acNoNode": "无节点",
+    "diag.batteryNodeMissing": "未找到电池节点",
+    "diag.thresholdNode": "threshold 节点：{value}",
+    "diag.fan": "风扇：{value}",
+    "diag.fanUnavailable": "不可用",
+    "diag.fanManual": "手动",
+    "diag.fanEcAuto": "EC 自动",
+    "diag.fanNotDetected": "未检测",
+    "diag.noAwakeBypass": "内核未提供 inhibit-charge-awake",
+    // ---- 错误 / 提示 ----
+    "error.readBattery": "读取电池状态失败",
+    "error.readFan": "读取风扇状态失败",
+    "error.readState": "读取状态失败",
+    "error.switchChargeMode": "切换充电模式失败",
+    "error.setChargeLimit": "设置充电上限失败",
+    "error.saveSettings": "保存设置失败",
+    "error.switchFanMode": "切换风扇模式失败",
+    "error.curveNotIncreasing": "曲线节点的温度必须严格递增（每个节点都要比前一个更高）",
+    "error.saveCurve": "保存自定义曲线失败",
+    "error.curveSavedSwitchFailed": "曲线已保存，但切换为自定义模式失败，尚未在风扇上生效",
+};
+
+const enUS = {
+    // ---- common ----
+    "common.unknown": "Unknown",
+    "common.notAvailable": "N/A",
+    "common.notExist": "absent",
+    "common.exists": "present",
+    "common.refresh": "Refresh",
+    "common.reload": "Reload",
+    "common.hint": "Notice",
+    "common.diagnostic": "Diagnostics",
+    // ---- charge modes ----
+    "charge.mode.auto": "Normal charging",
+    "charge.mode.inhibitAwake": "Bypass while on",
+    "charge.mode.inhibit": "Bypass always",
+    "charge.mode.forceDischarge": "Force discharge",
+    "charge.mode.desc.auto": "Charges the battery normally, respecting the charge limit below.",
+    "charge.mode.desc.inhibitAwake": "Stops charging while running and runs off wall power; resumes charging when the device sleeps on AC.",
+    "charge.mode.desc.inhibit": "Stops charging both while running and while asleep. Best for long-term docked use.",
+    "charge.mode.desc.forceDischarge": "Forces discharge while plugged in.",
+    // ---- battery status ----
+    "battery.section": "Battery",
+    "battery.status.charging": "Charging",
+    "battery.status.discharging": "Discharging",
+    "battery.status.full": "Full",
+    "battery.status.notCharging": "Not charging",
+    "battery.status.supplying": "On AC power",
+    "battery.summary": "{status} · limit {limit}",
+    "battery.summary.noLimit": "{status} · no limit",
+    "battery.summary.watts": "{status} · {watts} · limit {limit}",
+    "battery.currentMode": "Current mode: ",
+    "battery.noLimit": "No limit",
+    "battery.noLimitOption": "No limit (charge to {value}%)",
+    "battery.chargeModeSection": "Charge mode",
+    "battery.limitSection": "Charge limit",
+    "battery.limitLabel": "Stop charging at",
+    "battery.checked": "✓ {label}",
+    // ---- fan ----
+    "fan.section": "Fan",
+    "fan.mode.auto": "Auto",
+    "fan.mode.quiet": "Quiet",
+    "fan.mode.balanced": "Balanced",
+    "fan.mode.performance": "Performance",
+    "fan.mode.custom": "Custom",
+    "fan.currentMode": "Current mode: ",
+    "fan.manual": " (manual PWM)",
+    "fan.ecAuto": " (EC auto)",
+    "fan.editCurve": "Edit fan curve →",
+    "fan.unavailableDefault": "No oxpec fan control interface detected",
+    "fan.noCurveForMode": "No {label} curve available",
+    "fan.curveSection": "Custom fan curve",
+    "fan.node": "Point {index} · {temp}°C",
+    "fan.tempRange": "Temperature ({min}–{max}°C)",
+    "fan.saveAndApply": "Save as custom and apply",
+    "fan.presetSection": "Curve presets",
+    "fan.applyPreset": "Load {label} curve",
+    "fan.restoreDefault": "Restore default curve",
+    "fan.diag.controller": "Controller: {value}",
+    "fan.diag.tempSensor": "Temp sensor: {value}",
+    "fan.diag.pwmNode": "PWM node: {value}",
+    "fan.diag.controlMethod": "Control: {value}",
+    "fan.diag.safetyTemp": "Safety threshold: {value}°C (full speed at or above)",
+    "fan.diag.safetyNote": "",
+    "fan.back": "← Back",
+    // ---- settings ----
+    "settings.section": "Settings",
+    "settings.autoRestore": "Restore on Decky startup",
+    "settings.autoRestoreDesc": "Re-apply the last saved charge mode, charge limit and fan mode",
+    // ---- diagnostics ----
+    "diag.section": "Diagnostics",
+    "diag.ac": "AC adapter: {value}",
+    "diag.acOnline": "online",
+    "diag.acOffline": "offline",
+    "diag.acNoNode": "no node",
+    "diag.batteryNodeMissing": "Battery node not found",
+    "diag.thresholdNode": "threshold node: {value}",
+    "diag.fan": "Fan: {value}",
+    "diag.fanUnavailable": "unavailable",
+    "diag.fanManual": "manual",
+    "diag.fanEcAuto": "EC auto",
+    "diag.fanNotDetected": "not detected",
+    "diag.noAwakeBypass": "kernel does not provide inhibit-charge-awake",
+    // ---- errors / notices ----
+    "error.readBattery": "Failed to read battery status",
+    "error.readFan": "Failed to read fan status",
+    "error.readState": "Failed to read status",
+    "error.switchChargeMode": "Failed to switch charge mode",
+    "error.setChargeLimit": "Failed to set charge limit",
+    "error.saveSettings": "Failed to save settings",
+    "error.switchFanMode": "Failed to switch fan mode",
+    "error.curveNotIncreasing": "Curve temperatures must strictly increase (each point higher than the previous one)",
+    "error.saveCurve": "Failed to save custom curve",
+    "error.curveSavedSwitchFailed": "Curve saved, but switching to Custom mode failed — not yet active on the fan",
+};
+
+/**
+ * 插件自己的 i18n 实现。
+ *
+ * **为什么不直接用 Decky 的机制**：Decky 对"插件"没有官方 i18n ——
+ * 本地 `@decky/ui@4.12.1` 的类型定义里**没有任何** translation/i18n 导出
+ * （Loader 自身用的是 react-i18next，但那是它自己界面的，插件用不上）。
+ * 社区通行做法就是各插件自己写一份，这里也一样。
+ *
+ * 语言探测用 `window.LocalizationManager.m_rgLocalesToUse` —— 它是 Steam
+ * 客户端暴露的语言列表（如 `["schinese"]`），并且是 `@decky/ui` **官方声明**
+ * 在全局类型里的字段（`@decky/ui/dist/globals/stores.d.ts`），
+ * 比 `SteamClient.Settings.GetCurrentLanguage()`（返回 Promise，只能异步取）
+ * 更适合在渲染路径上同步调用。
+ *
+ * 规则（用户定的）：**简/繁中文 → 中文，其余一律英文**。
+ *
+ * 探测不到时**退回英文**，并且**不抛错** —— 最坏情况是界面变英文，
+ * 不该因为 Steam 内部结构变了就让整个 QAM 面板空白。
+ */
+/** 判定为"中文"的 Steam 语言标识（小写比较）。 */
+const CHINESE_LOCALES = [
+    "schinese", // 简体中文
+    "tchinese", // 繁体中文
+    "zh", // 通用中文
+    "zh-cn",
+    "zh-hans",
+    "zh-tw",
+    "zh-hant",
+    "zh-hk",
+];
+/**
+ * 从 Steam 的语言标识列表里挑出插件要用的语言。
+ *
+ * `locales` 形如 `["schinese"]`；空数组 / 取不到 → 英文。
+ * 只要**任一**个标识是中文就判为中文：Steam 给的是"按优先级排序的列表"，
+ * 用户选了中文时它一定在列表里。
+ */
+function resolveLanguage(locales) {
+    if (!locales || locales.length === 0)
+        return "en";
+    for (const locale of locales) {
+        if (typeof locale !== "string")
+            continue;
+        if (CHINESE_LOCALES.includes(locale.trim().toLowerCase()))
+            return "zh";
+    }
+    return "en";
+}
+/** 同步读 Steam 的界面语言列表；任何异常都退回空列表。 */
+function detectLocales() {
+    try {
+        const manager = window.LocalizationManager;
+        const locales = manager?.m_rgLocalesToUse;
+        if (Array.isArray(locales))
+            return locales.filter((x) => typeof x === "string");
+    }
+    catch {
+        // 访问 Steam 全局对象在非 Steam 环境（如离线测试）会抛错，
+        // 这里静默退回，交给上面的"英文兜底"。
+    }
+    return [];
+}
+const TABLES = { zh: zhCN, en: enUS };
+/**
+ * 按当前语言取文案。
+ *
+ * 找不到键时**返回键本身**（而不是空串）—— 空串会让界面出现"什么都没有"
+ * 的诡异空白，返回键至少能一眼看出是漏了哪条。
+ */
+function translate(lang, key, values) {
+    const table = TABLES[lang] ?? enUS;
+    const template = table[key];
+    if (typeof template !== "string")
+        return key;
+    return values ? format(template, values) : template;
+}
+/** 一次解析出当前语言与取文案函数，供组件在渲染前调用一次。 */
+function createTranslator(locales) {
+    const lang = resolveLanguage(detectLocales());
+    return {
+        lang,
+        t: (key, values) => translate(lang, key, values),
+    };
+}
+
 /* ------------------------------------------------------------------ RPC */
 const getStatus = callable("get_status");
 const setChargeMode = callable("set_charge_mode");
 const setChargeThreshold = callable("set_charge_threshold");
 const setAutoRestore = callable("set_auto_restore");
+/**
+ * 把探测到的界面语言告知后端。
+ *
+ * 后端返回的用户可见文案（错误信息、启动恢复报告、风扇不可用原因）也必须是
+ * 双语的，但它没有任何办法知道 Steam 的界面语言 —— 那套 LocalizationManager
+ * 只活在渲染进程里。所以由前端在挂载时探测一次、调用 `set_locale` 推送过去。
+ *
+ * 为什么加载与刷新代码里再调一次：Decky 重新加载插件时**不会**重新挂载
+ * 已存在的组件树（只重跑后端的 `_main`），此时 `_lang` 会退回类属性默认值
+ * `"en"`；不过前端此时会重新加载并重新执行模块顶层的这段代码，所以这里
+ * 补一次即可对齐。失败静默忽略：拿不到语言时后端退回英文，不该因此报错。
+ */
+const setLocale = callable("set_locale");
+let localePushed = null;
+const pushLocale = (lang) => {
+    if (localePushed)
+        return;
+    localePushed = Promise.resolve(setLocale(lang)).catch(() => undefined);
+};
 const getFanStatus = callable("get_fan_status");
 const getFanProfiles = callable("get_fan_profiles");
 const setFanMode = callable("set_fan_mode");
 const setFanCustomCurve = callable("set_fan_custom_curve");
 /* -------------------------------------------------------------- 辅助函数 */
-const MODE_LABELS = {
-    auto: "正常充电",
-    "inhibit-charge-awake": "开机旁路",
-    "inhibit-charge": "始终旁路",
-    "force-discharge": "强制放电",
+/**
+ * 充电模式 → 文案键。
+ *
+ * 之前这里是 `Record<string, string>` 的中文字面量；现在只存**键**，
+ * 实际文案在渲染时按当前语言取（见 `src/i18n/`）。
+ */
+const MODE_LABEL_KEYS = {
+    auto: "charge.mode.auto",
+    "inhibit-charge-awake": "charge.mode.inhibitAwake",
+    "inhibit-charge": "charge.mode.inhibit",
+    "force-discharge": "charge.mode.forceDischarge",
 };
-const MODE_DESCRIPTIONS = {
-    auto: "正常向电池充电，并遵循下方设置的充电上限。",
-    "inhibit-charge-awake": "运行时停止充电、直接由电源供电；设备睡眠并接电时恢复充电。",
-    "inhibit-charge": "运行和睡眠状态都停止充电，适合长期插电使用。",
-    "force-discharge": "接电状态下强制放电。",
+const MODE_DESC_KEYS = {
+    auto: "charge.mode.desc.auto",
+    "inhibit-charge-awake": "charge.mode.desc.inhibitAwake",
+    "inhibit-charge": "charge.mode.desc.inhibit",
+    "force-discharge": "charge.mode.desc.forceDischarge",
 };
-const statusName = (value) => ({
-    Charging: "充电中",
-    Discharging: "放电中",
-    Full: "已充满",
-    "Not charging": "未充电",
-    Unknown: "未知",
-}[value ?? ""] ??
-    value ??
-    "--");
-const modeLabel = (mode) => (mode ? MODE_LABELS[mode] ?? mode : "未知");
+/** 内核 status 字符串 → 文案键。 */
+const STATUS_KEYS = {
+    Charging: "battery.status.charging",
+    Discharging: "battery.status.discharging",
+    Full: "battery.status.full",
+    "Not charging": "battery.status.notCharging",
+    Unknown: "common.unknown",
+};
 const REFRESH_INTERVAL_MS = 5000;
 /** 与后端 THRESHOLD_DISABLED 保持一致：写入该值即解除上限。 */
 const THRESHOLD_DISABLED = 100;
@@ -85,18 +406,18 @@ const BatteryIcon = () => (SP_JSX.jsxs("svg", { width: "19", height: "19", viewB
 /** 曲线页里每个节点最多放这么多档 PWM 读取范围 */
 const FAN_CURVE_POINTS = 5;
 /**
- * 主页面与曲线页共用的模式短名。
+ * 主页面与曲线页共用的模式**文案键**。
  *
  * 后端也给了 `fan.mode_labels`，但那是给状态行走的文案；这里的短名要配按钮，
  * 所以单独定义一份。两边都保留是有意的——不要为了"减少重复"而让按钮文案
- * 跟着后端走，那会让中文/英文混排不受前端控制。
+ * 跟着后端走，那会让语言选择不受前端控制（后端不知道用户界面语言）。
  */
-const FAN_MODE_LABELS = {
-    auto: "自动",
-    quiet: "静音",
-    balanced: "均衡",
-    performance: "性能",
-    custom: "自定义",
+const FAN_MODE_LABEL_KEYS = {
+    auto: "fan.mode.auto",
+    quiet: "fan.mode.quiet",
+    balanced: "fan.mode.balanced",
+    performance: "fan.mode.performance",
+    custom: "fan.mode.custom",
 };
 /**
  * 主页面上按顺序列出的风扇模式按钮。
@@ -183,6 +504,45 @@ function scrollPanelToTop(node) {
 }
 /* -------------------------------------------------------------- 主界面 */
 function Content() {
+    /**
+     * 当前语言与取文案函数。
+     *
+     * 用 `useState` 的**惰性初始化**：语言在组件挂载那一刻定型（探测一次），
+     * 保证首帧就有正确文案 —— 若放在 `useEffect` 里再设，第一帧会闪一下英文。
+     *
+     * 不在运行中切换语言：Steam 的语言设置改了要重启客户端才生效，
+     * 插件跟随重启后的挂载即可，不必监听变更（也就不会引入监听开销）。
+     */
+    const [{ t, lang }] = SP_REACT.useState(() => createTranslator());
+    /**
+     * 把语言推给后端一次（见模块顶层 `pushLocale` 的说明）。
+     *
+     * 不能放进下面那个轮询 `useEffect`：那里每 5 秒跑一次、还会在 `view`
+     * 变化时重建，而语言一辈子只需要同步一次。`pushLocale` 自带幂等保护，
+     * 即便 React 的 StrictMode 把组件挂载两次也只发一次请求。
+     */
+    SP_REACT.useEffect(() => {
+        pushLocale(lang);
+    }, [lang]);
+    /** 按当前语言取充电模式名；未知模式原样透出（比显示"未知"更有诊断价值）。 */
+    const modeLabel = (mode) => {
+        if (!mode)
+            return t("common.unknown");
+        const key = MODE_LABEL_KEYS[mode];
+        return key ? t(key) : mode;
+    };
+    /** 内核 status → 本地化名称。 */
+    const statusName = (value) => {
+        const key = STATUS_KEYS[value ?? ""];
+        if (key)
+            return t(key);
+        return value ?? "--";
+    };
+    /** 风扇模式短名（按钮 / 状态行共用）。 */
+    const fanModeLabel = (mode) => {
+        const key = FAN_MODE_LABEL_KEYS[mode];
+        return key ? t(key) : mode;
+    };
     const [state, setState] = SP_REACT.useState(null);
     const [error, setError] = SP_REACT.useState(null);
     const [busy, setBusy] = SP_REACT.useState(false);
@@ -194,6 +554,24 @@ function Content() {
     const [curve, setCurve] = SP_REACT.useState(FAN_CURVE_SEED);
     const [curveDirty, setCurveDirty] = SP_REACT.useState(false);
     const [curveError, setCurveError] = SP_REACT.useState(null);
+    /**
+     * 当前生效的充电模式（`charge_behaviour.active`）。
+     *
+     * 必须定义在 `state` 之后：这几个本地化辅助函数都依赖它，
+     * 放在 `useState` 之前会踩暂时性死区（`TS2448`）。
+     */
+    const active = state?.charge_behaviour.active ?? null;
+    /**
+     * 充电模式按钮文案：当前生效的那一项加 `✓ ` 前缀。
+     *
+     * 勾号走 `battery.checked` 模板而不是直接拼 `"✓ " + label`——
+     * 这样"标记符号要不要带空格、用哪个符号"都能按语言分别控制，
+     * 语言表里也不会留下硬编码的标点。
+     */
+    const chargeModeButton = (mode, key) => {
+        const label = t(key);
+        return active === mode ? t("battery.checked", { label }) : label;
+    };
     /** 插件自身那层 DOM，用来向上寻找真正在滚动的祖先。 */
     const rootRef = SP_REACT.useRef(null);
     /**
@@ -215,7 +593,7 @@ function Content() {
         return message;
     };
     const refresh = async () => {
-        apply(await getStatus(), "读取电池状态失败");
+        apply(await getStatus(), t("error.readBattery"));
     };
     /** 拉一次风扇状态；不可用时只记录原因，不当作操作失败弹通知。 */
     const refreshFan = async () => {
@@ -225,7 +603,7 @@ function Content() {
             setFanError(result.data.available ? null : (result.data.reason ?? null));
             return result.data;
         }
-        setFanError(result.error ?? "读取风扇状态失败");
+        setFanError(result.error ?? t("error.readFan"));
         return null;
     };
     const refreshFanProfiles = async () => {
@@ -267,7 +645,7 @@ function Content() {
             try {
                 const batteryResult = await getStatus();
                 if (!cancelled)
-                    apply(batteryResult, "读取电池状态失败");
+                    apply(batteryResult, t("error.readBattery"));
             }
             catch (error) {
                 // **必须自己捕获**：RPC 层的 Promise 一旦被拒绝，就会变成一次
@@ -275,7 +653,7 @@ function Content() {
                 // 电池读失败不该把风扇状态一起拖下水（两者是独立的 RPC）。
                 // 注意只记原因、不弹通知：轮询每 5 秒一次，EC 卡顿时会刷屏。
                 if (!cancelled) {
-                    setFanError(error instanceof Error ? error.message : "读取状态失败");
+                    setFanError(error instanceof Error ? error.message : t("error.readState"));
                 }
             }
             try {
@@ -296,19 +674,19 @@ function Content() {
                     }
                 }
                 else {
-                    setFanError(fanResult.error ?? "读取风扇状态失败");
+                    setFanError(fanResult.error ?? t("error.readFan"));
                 }
             }
             catch (error) {
                 // 同上：吞掉异常但不吞掉续排（续排由下面的 finally 负责）。
                 if (!cancelled) {
-                    setFanError(error instanceof Error ? error.message : "读取风扇状态失败");
+                    setFanError(error instanceof Error ? error.message : t("error.readFan"));
                 }
             }
             finally {
                 // 必须放在 finally 里：中途抛错（RPC 层异常）时若不排下一次，
                 // 轮询会**静默停死**，界面停在旧数据上再也不刷新。
-                // 用 finally 保证无论成功失败都续上，与 setInterval 的语义对齐。
+                // 用 finally 保证无论成功失败都续上，与递归 setTimeout 的语义一致。
                 if (!cancelled) {
                     timer = setTimeout(tick, REFRESH_INTERVAL_MS);
                 }
@@ -335,12 +713,12 @@ function Content() {
     const changeMode = async (mode) => {
         setBusy(true);
         try {
-            const problem = apply(await setChargeMode(mode), "切换充电模式失败");
+            const problem = apply(await setChargeMode(mode), t("error.switchChargeMode"));
             if (problem)
                 notifyFailure(problem);
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : "切换充电模式失败";
+            const message = error instanceof Error ? error.message : t("error.switchChargeMode");
             setError(message);
             notifyFailure(message);
         }
@@ -351,12 +729,12 @@ function Content() {
     const changeThreshold = async (value) => {
         setBusy(true);
         try {
-            const problem = apply(await setChargeThreshold(value), "设置充电上限失败");
+            const problem = apply(await setChargeThreshold(value), t("error.setChargeLimit"));
             if (problem)
                 notifyFailure(problem);
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : "设置充电上限失败";
+            const message = error instanceof Error ? error.message : t("error.setChargeLimit");
             setError(message);
             notifyFailure(message);
         }
@@ -367,12 +745,12 @@ function Content() {
     const changeAutoRestore = async (enabled) => {
         setBusy(true);
         try {
-            const problem = apply(await setAutoRestore(enabled), "保存设置失败");
+            const problem = apply(await setAutoRestore(enabled), t("error.saveSettings"));
             if (problem)
                 notifyFailure(problem);
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : "保存设置失败";
+            const message = error instanceof Error ? error.message : t("error.saveSettings");
             setError(message);
             notifyFailure(message);
         }
@@ -394,7 +772,7 @@ function Content() {
     const changeFanMode = async (mode) => {
         setFanBusy(true);
         try {
-            const problem = await applyFan(await setFanMode(mode), "切换风扇模式失败");
+            const problem = await applyFan(await setFanMode(mode), t("error.switchFanMode"));
             if (problem) {
                 notifyFailure(problem);
                 return false;
@@ -416,7 +794,7 @@ function Content() {
             return true;
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : "切换风扇模式失败";
+            const message = error instanceof Error ? error.message : t("error.switchFanMode");
             setFanError(message);
             notifyFailure(message);
             return false;
@@ -468,7 +846,7 @@ function Content() {
         // 于是"高温对应低 PWM"这种错乱会被悄悄写进设置里。顺序不对就报错。
         const points = curve.map((point) => [...point]);
         if (!curveIsStrictlyIncreasing(points)) {
-            const message = "曲线节点的温度必须严格递增（每个节点都要比前一个更高）";
+            const message = t("error.curveNotIncreasing");
             setCurveError(message);
             notifyFailure(message);
             return;
@@ -478,7 +856,7 @@ function Content() {
         try {
             const result = await setFanCustomCurve(points);
             if (!result.ok || !result.data) {
-                const message = result.error ?? "保存自定义曲线失败";
+                const message = result.error ?? t("error.saveCurve");
                 setCurveError(message);
                 notifyFailure(message);
                 return;
@@ -501,7 +879,7 @@ function Content() {
             if (fan?.mode !== "custom") {
                 const applied = await changeFanMode("custom");
                 if (!applied) {
-                    setCurveError("曲线已保存，但切换为自定义模式失败，尚未在风扇上生效");
+                    setCurveError(t("error.curveSavedSwitchFailed"));
                     return;
                 }
             }
@@ -512,7 +890,7 @@ function Content() {
             setCurveDirty(false);
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : "保存自定义曲线失败";
+            const message = error instanceof Error ? error.message : t("error.saveCurve");
             setCurveError(message);
             notifyFailure(message);
         }
@@ -531,7 +909,7 @@ function Content() {
     const loadPresetCurve = (mode) => {
         const preset = fanProfiles?.profiles?.[mode];
         if (!Array.isArray(preset) || preset.length !== FAN_CURVE_POINTS) {
-            notifyFailure(`没有可用的${FAN_MODE_LABELS[mode] ?? mode}曲线`);
+            notifyFailure(t("fan.noCurveForMode", { label: fanModeLabel(mode) }));
             return;
         }
         curveTouched.current = true; // 别让下一次轮询把刚载入的值覆盖掉
@@ -547,7 +925,6 @@ function Content() {
         setCurveError(null);
         setCurveDirty(true);
     };
-    const active = state?.charge_behaviour.active ?? null;
     const thresholdValue = SP_REACT.useMemo(() => {
         if (typeof state?.threshold === "number")
             return state.threshold;
@@ -560,7 +937,10 @@ function Content() {
             label: `${value}%`,
             data: value,
         })),
-        { label: `不限制（充满到 ${THRESHOLD_DISABLED}%）`, data: THRESHOLD_DISABLED },
+        {
+            label: t("battery.noLimitOption", { value: THRESHOLD_DISABLED }),
+            data: THRESHOLD_DISABLED,
+        },
     ], [state?.presets]);
     /* ---------------------------------------------------------- 风扇曲线页 */
     if (view === "fan") {
@@ -572,26 +952,26 @@ function Content() {
         const available = fan?.available ?? false;
         // 预设套用**先落到滑杆上**，让用户看清曲线长什么样、还能微调；
         // 真正写进 EC 要等他按「保存为自定义并应用」。
-        const presetButtons = [
-            ["quiet", "静音"],
-            ["balanced", "均衡"],
-            ["performance", "性能"],
-        ];
-        return (SP_JSX.jsxs("div", { ref: rootRef, children: [SP_JSX.jsx(DFL.PanelSection, { children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setView("main"), children: "\u2190 \u8FD4\u56DE" }) }) }), !available && (SP_JSX.jsx(DFL.PanelSection, { title: "\u63D0\u793A", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: blockStyle, children: fanError ?? "该机型未提供可用的风扇控制节点" }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: "\u81EA\u5B9A\u4E49\u98CE\u6247\u66F2\u7EBF", children: [curve.map((point, index) => {
+        const presetButtons = ["quiet", "balanced", "performance"];
+        return (SP_JSX.jsxs("div", { ref: rootRef, children: [SP_JSX.jsx(DFL.PanelSection, { children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setView("main"), children: t("fan.back") }) }) }), !available && (SP_JSX.jsx(DFL.PanelSection, { title: t("common.hint"), children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: blockStyle, children: fanError ?? t("fan.unavailableDefault") }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: t("fan.curveSection"), children: [curve.map((point, index) => {
                             // 温度滑杆夹在左右邻居之间，滑不出重复或倒序；
                             // 这样"顺序错误"在动手时就不可达，保存时的校验只是兜底。
                             const bounds = tempBoundsFor(curve, index, minTemp, maxTemp);
-                            return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { width: "100%", paddingTop: "4px" }, children: [SP_JSX.jsxs("div", { style: rowStyle, children: [SP_JSX.jsxs("span", { children: ["\u8282\u70B9 ", index + 1, " \u00B7 ", point[0], "\u00B0C"] }), SP_JSX.jsxs("span", { children: ["PWM ", point[1]] })] }), SP_JSX.jsx(DFL.SliderField, { label: `温度（${bounds.min}–${bounds.max}°C）`, value: point[0], min: bounds.min, max: bounds.max, step: 1, showValue: false, disabled: fanBusy || !available || bounds.min > bounds.max, onChange: (value) => updateCurvePoint(index, 0, value) }), SP_JSX.jsx(DFL.SliderField, { label: "PWM", value: point[1], min: minPwm, max: maxPwm, step: 1, showValue: false, disabled: fanBusy || !available, onChange: (value) => updateCurvePoint(index, 1, value) })] }) }, index));
-                        }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy || !available || !curveDirty, onClick: saveCurve, children: "\u4FDD\u5B58\u4E3A\u81EA\u5B9A\u4E49\u5E76\u5E94\u7528" }) }), curveError && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: blockStyle, children: curveError }) }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u66F2\u7EBF\u9884\u8BBE", children: [presetButtons.map(([mode, label]) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: fanBusy || !available, onClick: () => loadPresetCurve(mode), children: ["\u5E94\u7528", label, "\u66F2\u7EBF"] }) }, mode))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy || !available || !curveDirty, onClick: restoreSeedCurve, children: "\u8FD8\u539F\u9ED8\u8BA4\u66F2\u7EBF" }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8BCA\u65AD", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
+                            return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { width: "100%", paddingTop: "4px" }, children: [SP_JSX.jsxs("div", { style: rowStyle, children: [SP_JSX.jsx("span", { children: t("fan.node", { index: index + 1, temp: point[0] }) }), SP_JSX.jsxs("span", { children: ["PWM ", point[1]] })] }), SP_JSX.jsx(DFL.SliderField, { label: t("fan.tempRange", { min: bounds.min, max: bounds.max }), value: point[0], min: bounds.min, max: bounds.max, step: 1, showValue: false, disabled: fanBusy || !available || bounds.min > bounds.max, onChange: (value) => updateCurvePoint(index, 0, value) }), SP_JSX.jsx(DFL.SliderField, { label: "PWM", value: point[1], min: minPwm, max: maxPwm, step: 1, showValue: false, disabled: fanBusy || !available, onChange: (value) => updateCurvePoint(index, 1, value) })] }) }, index));
+                        }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy || !available || !curveDirty, onClick: saveCurve, children: t("fan.saveAndApply") }) }), curveError && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: blockStyle, children: curveError }) }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: t("fan.presetSection"), children: [presetButtons.map((mode) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy || !available, onClick: () => loadPresetCurve(mode), children: t("fan.applyPreset", { label: fanModeLabel(mode) }) }) }, mode))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy || !available || !curveDirty, onClick: restoreSeedCurve, children: t("fan.restoreDefault") }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: t("common.diagnostic"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
                                     ...blockStyle,
                                     fontFamily: "monospace",
                                     fontSize: "11px",
                                     opacity: 0.75,
-                                }, children: ["\u63A7\u5236\u5668\uFF1A", fan?.controller ?? "--", SP_JSX.jsx("br", {}), "\u6E29\u5EA6\u4F20\u611F\u5668\uFF1A", fan?.temp_sensor ?? "--", SP_JSX.jsx("br", {}), "PWM \u8282\u70B9\uFF1A", fan?.pwm ?? "不存在", SP_JSX.jsx("br", {}), "pwm1_enable\uFF1A", fan?.pwm_enable ?? "不存在", fan?.pwm_enable_label ? `（${fan.pwm_enable_label}）` : "", SP_JSX.jsx("br", {}), "\u63A7\u5236\u65B9\u5F0F\uFF1A", fan?.manual ? "手动 PWM" : "EC 自动", SP_JSX.jsx("br", {}), "\u5B89\u5168\u9608\u503C\uFF1A", fan?.safety_temp ?? "--", "\u00B0C\uFF08\u8FBE\u5230\u5373\u6EE1\u901F\uFF09"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy, onClick: refreshFan, children: "\u5237\u65B0" }) })] })] }));
+                                }, children: [t("fan.diag.controller", { value: fan?.controller ?? "--" }), SP_JSX.jsx("br", {}), t("fan.diag.tempSensor", { value: fan?.temp_sensor ?? "--" }), SP_JSX.jsx("br", {}), t("fan.diag.pwmNode", {
+                                        value: fan?.pwm ?? t("common.notExist"),
+                                    }), SP_JSX.jsx("br", {}), "pwm1_enable\uFF1A", fan?.pwm_enable ?? t("common.notExist"), fan?.pwm_enable_label ? `（${fan.pwm_enable_label}）` : "", SP_JSX.jsx("br", {}), t("fan.diag.controlMethod", {
+                                        value: fan?.manual ? t("fan.manual") : t("fan.ecAuto"),
+                                    }), SP_JSX.jsx("br", {}), t("fan.diag.safetyTemp", { value: fan?.safety_temp ?? "--" })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy, onClick: refreshFan, children: t("common.refresh") }) })] })] }));
     }
     /* -------------------------------------------------------------- 主页面 */
     if (error && !state) {
-        return (SP_JSX.jsxs(DFL.PanelSection, { title: "F1Pro EC Control", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: refresh, children: "\u91CD\u65B0\u8BFB\u53D6" }) })] }));
+        return (SP_JSX.jsxs(DFL.PanelSection, { title: "F1Pro EC Control", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: refresh, children: t("common.reload") }) })] }));
     }
     const capacity = state?.capacity ?? "--";
     /** 风扇节点是否可用（不可用时整块降级成一行原因，不摆没用的按钮）。 */
@@ -632,20 +1012,39 @@ function Content() {
     const watts = !supplyOnly && flowing && typeof state?.power_watts === "number"
         ? `${state.power_watts >= 0 ? "" : "-"}${Math.abs(state.power_watts).toFixed(1)} W`
         : null;
-    return (SP_JSX.jsxs("div", { ref: rootRef, children: [SP_JSX.jsxs(DFL.PanelSection, { title: "\u7535\u6C60\u72B6\u6001", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", width: "100%" }, children: [SP_JSX.jsx("span", { children: state?.battery ?? "BAT" }), SP_JSX.jsxs("span", { children: [capacity, "%"] })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: [supplyOnly ? "供电中" : statusName(state?.status), watts ? ` · ${watts}` : "", " \u00B7 \u4E0A\u9650", " ", typeof thresholdValue === "number" ? `${thresholdValue}%` : "不限制", SP_JSX.jsx("br", {}), "\u5F53\u524D\u6A21\u5F0F\uFF1A", SP_JSX.jsx("b", { children: modeLabel(active) })] }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u5145\u7535\u6A21\u5F0F", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !state?.supports_normal, onClick: () => changeMode("auto"), children: active === "auto" ? "✓ 正常充电" : "正常充电" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !state?.supports_awake_bypass, onClick: () => changeMode("inhibit-charge-awake"), children: active === "inhibit-charge-awake" ? "✓ 开机旁路" : "开机旁路" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !state?.supports_bypass, onClick: () => changeMode("inhibit-charge"), children: active === "inhibit-charge" ? "✓ 始终旁路" : "始终旁路" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: MODE_DESCRIPTIONS[active ?? ""] ?? "" }) })] }), SP_JSX.jsx(DFL.PanelSection, { title: "\u5145\u7535\u4E0A\u9650", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u505C\u6B62\u5145\u7535\u7535\u91CF", rgOptions: thresholdOptions, selectedOption: thresholdValue ?? state?.threshold_disabled_value ?? 100, disabled: busy || !state?.supports_threshold, onChange: (option) => changeThreshold(option.data) }) }) }), SP_JSX.jsx(DFL.PanelSection, { title: "\u98CE\u6247", children: fanAvailable ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: rowStyle, children: [SP_JSX.jsx("span", { children: fan?.temperature != null ? `${fan.temperature.toFixed(1)}°C` : "--" }), SP_JSX.jsx("span", { children: fan?.rpm != null ? `${fan.rpm} RPM` : "-- RPM" }), SP_JSX.jsx("span", { children: fan?.pwm != null ? `PWM ${fan.pwm}` : "PWM --" })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: blockStyle, children: ["\u5F53\u524D\u6A21\u5F0F\uFF1A", SP_JSX.jsx("b", { children: FAN_MODE_LABELS[fan?.mode ?? ""] ?? fan?.mode_label ?? "未知" }), fan?.manual ? "（手动 PWM）" : "（EC 自动控温）"] }) }), FAN_MODE_ORDER.map((mode) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy, onClick: () => changeFanMode(mode), children: fan?.mode === mode
-                                    ? `✓ ${FAN_MODE_LABELS[mode]}`
-                                    : FAN_MODE_LABELS[mode] }) }, mode))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setView("fan"), children: "\u7F16\u8F91\u98CE\u6247\u66F2\u7EBF \u2192" }) })] })) : (
+    /**
+     * 状态行文案：`状态 · [瓦数 ·] 上限 N%`。
+     *
+     * 有瓦数时用带 `{watts}` 占位的那条，否则用不带的那条 ——
+     * **不要用字符串拼接空瓦数**（会留下多余的 ` · `）。
+     */
+    const summaryStatus = supplyOnly
+        ? t("battery.status.supplying")
+        : statusName(state?.status);
+    const limitText = typeof thresholdValue === "number" ? `${thresholdValue}%` : t("battery.noLimit");
+    const batterySummary = watts
+        ? t("battery.summary.watts", { status: summaryStatus, watts, limit: limitText })
+        : t("battery.summary", { status: summaryStatus, limit: limitText });
+    return (SP_JSX.jsxs("div", { ref: rootRef, children: [SP_JSX.jsxs(DFL.PanelSection, { title: t("battery.section"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", width: "100%" }, children: [SP_JSX.jsx("span", { children: state?.battery ?? "BAT" }), SP_JSX.jsxs("span", { children: [capacity, "%"] })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: [batterySummary, SP_JSX.jsx("br", {}), t("battery.currentMode"), SP_JSX.jsx("b", { children: modeLabel(active) })] }) })] }), SP_JSX.jsxs(DFL.PanelSection, { title: t("battery.chargeModeSection"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !state?.supports_normal, onClick: () => changeMode("auto"), children: chargeModeButton("auto", "charge.mode.auto") }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !state?.supports_awake_bypass, onClick: () => changeMode("inhibit-charge-awake"), children: chargeModeButton("inhibit-charge-awake", "charge.mode.inhibitAwake") }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !state?.supports_bypass, onClick: () => changeMode("inhibit-charge"), children: chargeModeButton("inhibit-charge", "charge.mode.inhibit") }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: active && MODE_DESC_KEYS[active] ? t(MODE_DESC_KEYS[active]) : "" }) })] }), SP_JSX.jsx(DFL.PanelSection, { title: t("battery.limitSection"), children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: t("battery.limitLabel"), rgOptions: thresholdOptions, selectedOption: thresholdValue ?? state?.threshold_disabled_value ?? 100, disabled: busy || !state?.supports_threshold, onChange: (option) => changeThreshold(option.data) }) }) }), SP_JSX.jsx(DFL.PanelSection, { title: t("fan.section"), children: fanAvailable ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: rowStyle, children: [SP_JSX.jsx("span", { children: fan?.temperature != null ? `${fan.temperature.toFixed(1)}°C` : "--" }), SP_JSX.jsx("span", { children: fan?.rpm != null ? `${fan.rpm} RPM` : "-- RPM" }), SP_JSX.jsx("span", { children: fan?.pwm != null ? `PWM ${fan.pwm}` : "PWM --" })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: blockStyle, children: [t("fan.currentMode"), SP_JSX.jsx("b", { children: fan?.mode ? fanModeLabel(fan.mode) : t("common.unknown") }), fan?.manual ? t("fan.manual") : t("fan.ecAuto")] }) }), FAN_MODE_ORDER.map((mode) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: fanBusy, onClick: () => changeFanMode(mode), children: fan?.mode === mode
+                                    ? t("battery.checked", { label: fanModeLabel(mode) })
+                                    : fanModeLabel(mode) }) }, mode))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setView("fan"), children: t("fan.editCurve") }) })] })) : (
                 // 不可用时**只留一行原因**，不要摆一排点了没反应的按钮。
-                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { ...blockStyle, opacity: 0.8 }, children: fan?.reason ?? fanError ?? "未检测到 oxpec 风扇控制接口" }) })) }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8BBE\u7F6E", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Decky \u542F\u52A8\u65F6\u81EA\u52A8\u6062\u590D", description: "\u91CD\u65B0\u5E94\u7528\u4E0A\u6B21\u4FDD\u5B58\u7684\u5145\u7535\u6A21\u5F0F\u3001\u5145\u7535\u4E0A\u9650\u4E0E\u98CE\u6247\u6A21\u5F0F", checked: state?.auto_restore ?? true, disabled: busy, onChange: changeAutoRestore }) }), state?.restore_report && state.restore_report.length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: state.restore_report.join("；") }) }))] }), error && (SP_JSX.jsx(DFL.PanelSection, { title: "\u63D0\u793A", children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8BCA\u65AD", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
+                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { ...blockStyle, opacity: 0.8 }, children: fan?.reason ?? fanError ?? t("fan.unavailableDefault") }) })) }), SP_JSX.jsxs(DFL.PanelSection, { title: t("settings.section"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: t("settings.autoRestore"), description: t("settings.autoRestoreDesc"), checked: state?.auto_restore ?? true, disabled: busy, onChange: changeAutoRestore }) }), state?.restore_report && state.restore_report.length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35, opacity: 0.8 }, children: state.restore_report.join("；") }) }))] }), error && (SP_JSX.jsx(DFL.PanelSection, { title: t("common.hint"), children: SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { whiteSpace: "normal", lineHeight: 1.35 }, children: error }) }) })), SP_JSX.jsxs(DFL.PanelSection, { title: t("common.diagnostic"), children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: {
                                 whiteSpace: "normal",
                                 lineHeight: 1.35,
                                 fontFamily: "monospace",
                                 fontSize: "11px",
                                 opacity: 0.75,
-                            }, children: [state?.battery_path ?? "未找到电池节点", SP_JSX.jsx("br", {}), "\u5916\u63A5\u7535\u6E90: ", state?.ac_node ?? "无节点", acOnline === null ? "" : acOnline ? " 在线" : " 离线", SP_JSX.jsx("br", {}), "status: ", state?.status ?? "不存在", SP_JSX.jsx("br", {}), "charge_behaviour: ", state?.behaviour_raw ?? "不存在", SP_JSX.jsx("br", {}), "power_now: ", state?.power_now ?? "不存在", SP_JSX.jsx("br", {}), "threshold \u8282\u70B9: ", state?.threshold_node ? "存在" : "不存在", SP_JSX.jsx("br", {}), "\u98CE\u6247: ", fan?.controller ?? "未检测", fan?.available === false ? " · 不可用" : fan?.manual ? " · 手动" : " · EC 自动", state && !state.supports_awake_bypass ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("br", {}), "\u5185\u6838\u672A\u63D0\u4F9B inhibit-charge-awake"] })) : null] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: () => {
+                            }, children: [state?.battery_path ?? t("diag.batteryNodeMissing"), SP_JSX.jsx("br", {}), t("diag.ac", { value: state?.ac_node ?? t("diag.acNoNode") }), acOnline === null ? "" : acOnline ? t("diag.acOnline") : t("diag.acOffline"), SP_JSX.jsx("br", {}), "status: ", state?.status ?? t("common.notExist"), SP_JSX.jsx("br", {}), "charge_behaviour: ", state?.behaviour_raw ?? t("common.notExist"), SP_JSX.jsx("br", {}), "power_now: ", state?.power_now ?? t("common.notExist"), SP_JSX.jsx("br", {}), t("diag.thresholdNode", {
+                                    value: state?.threshold_node ? t("common.exists") : t("common.notExist"),
+                                }), SP_JSX.jsx("br", {}), t("diag.fan", { value: fan?.controller ?? t("diag.fanNotDetected") }), fan?.available === false
+                                    ? ` · ${t("diag.fanUnavailable")}`
+                                    : fan?.manual
+                                        ? ` · ${t("diag.fanManual")}`
+                                        : ` · ${t("diag.fanEcAuto")}`, state && !state.supports_awake_bypass ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("br", {}), t("diag.noAwakeBypass")] })) : null] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: () => {
                                 refresh();
                                 refreshFan();
-                            }, children: "\u5237\u65B0" }) })] })] }));
+                            }, children: t("common.refresh") }) })] })] }));
 }
 var index = definePlugin(() => ({
     name: "F1Pro EC Control",

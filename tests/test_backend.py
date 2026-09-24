@@ -15,6 +15,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -281,6 +282,32 @@ def reset_settings():
         SETTINGS_FILE.unlink()
 
 
+def plugin_zh(**kwargs) -> "Plugin":
+    """建一个**界面语言为中文**的插件实例。
+
+    后端文案从 v0.6.12 起是双语的，默认语言是 ``"en"`` —— 这符合"系统不是简繁
+    中文就用英文"的产品规则，但也意味着没显式设语言的实例会返回英文。既有的
+    大量断言都在断言中文文案，语义上它们是"**中文界面下**该显示什么"，所以
+    统一走这个 helper 显式声明语言，而不是把断言改成英文（那会让中文表失去覆盖）。
+
+    语言写的是**类属性**（`Plugin._lang`），因为 `set_locale` 也写类属性 ——
+    这样测试与生产走的是同一条路（写实例属性曾让 `@classmethod` 里的
+    `_t_static` 读不到语言，曲线报错顽固地留在英文）。
+
+    英文路径由 ``test_i18n`` 单独覆盖，两边都不能少。
+    """
+    plugin = Plugin(**kwargs)
+    Plugin._lang = "zh"
+    return plugin
+
+
+def plugin_en(**kwargs) -> "Plugin":
+    """建一个**界面语言为英文**的插件实例（默认语言，显式写出以免依赖默认值）。"""
+    plugin = Plugin(**kwargs)
+    Plugin._lang = "en"
+    return plugin
+
+
 def isolated_settings(plugin, tmp: Path) -> Path:
     """给这个夹具一个**独占的设置目录**，返回它的设置文件路径。
 
@@ -401,7 +428,7 @@ def test_status_and_modes():
     reset_settings()
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-1-"))
     battery, kernel = make_battery(tmp)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery])
 
     status = asyncio.run(plugin.get_status())
@@ -445,7 +472,7 @@ def test_write_verification():
     reset_settings()
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-2-"))
     battery, kernel = make_battery(tmp)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery])
 
     # 内核静默忽略写入：插件必须报错，而不是假装成功。
@@ -485,7 +512,7 @@ def test_threshold_bounds():
     reset_settings()
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-3-"))
     battery, kernel = make_battery(tmp)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery])
 
     result = asyncio.run(plugin.set_charge_threshold(40))
@@ -514,7 +541,7 @@ def test_restore_on_start():
     install_fake_sysfs(tmp, kernel, [battery])
 
     # 第一次运行：用户设置上限 70% 并切到「始终旁路」。
-    plugin = Plugin()
+    plugin = plugin_zh()
     asyncio.run(plugin.set_charge_threshold(70))
     asyncio.run(plugin.set_charge_mode("inhibit-charge"))
     saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -526,7 +553,7 @@ def test_restore_on_start():
     kernel.threshold = 100
     (battery / "charge_control_end_threshold").write_text("100\n", encoding="utf-8")
 
-    fresh = Plugin()
+    fresh = plugin_zh()
     asyncio.run(fresh._main())
     check("重启后上限被恢复为 70", (battery / "charge_control_end_threshold").read_text().strip() == "70")
     check("重启后模式被恢复为始终旁路", "[inhibit-charge]" in read_behaviour(battery))
@@ -544,7 +571,7 @@ def test_restore_on_start():
     kernel.threshold = 100
     (battery / "charge_control_end_threshold").write_text("100\n", encoding="utf-8")
 
-    again = Plugin()
+    again = plugin_zh()
     asyncio.run(again._main())
     check("关闭自动恢复后不写上限", (battery / "charge_control_end_threshold").read_text().strip() == "100")
     check("关闭自动恢复后不写模式", "[auto]" in read_behaviour(battery))
@@ -570,7 +597,7 @@ def test_unsupported_kernel():
     kernel.active = "auto"
     kernel.render_behaviour()
 
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery])
 
     status = asyncio.run(plugin.get_status())
@@ -587,7 +614,7 @@ def test_unsupported_kernel():
 
     # 完全找不到电池节点。
     empty = Path(tempfile.mkdtemp(prefix="f1pro-5b-"))
-    plugin2 = Plugin()
+    plugin2 = plugin_zh()
     install_fake_sysfs(empty, kernel, [])
     status = asyncio.run(plugin2.get_status())
     check("没有电池节点时返回失败", status["ok"] is False, str(status))
@@ -608,7 +635,7 @@ def test_battery_selection():
     (other / "type").write_text("Battery\n", encoding="utf-8")
     (other / "capacity").write_text("40\n", encoding="utf-8")
 
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [other, real])
 
     status = asyncio.run(plugin.get_status())
@@ -630,7 +657,7 @@ def test_power_sign_and_ac_state():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-7-"))
     battery, kernel = make_battery(tmp)
     ac = make_ac(tmp, "ACAD", online=True)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [ac])
 
     # 内核的 power_now 恒为正值（ACPI 驱动取过绝对值），方向要靠 status 补。
@@ -661,7 +688,7 @@ def test_power_sign_and_ac_state():
     check("离电功率为 -37.6W", data["power_watts"] == -37.6, str(data.get("power_watts")))
 
     # 没有适配器节点时返回 None，交给界面降级判断，而不是猜一个值。
-    plugin2 = Plugin()
+    plugin2 = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [])
     data = asyncio.run(plugin2.get_status())["data"]
     check("无适配器节点时返回 None", data["ac_online"] is None, str(data.get("ac_online")))
@@ -669,14 +696,14 @@ def test_power_sign_and_ac_state():
 
     # 只有 USB-C 供电节点时回退使用它。
     usb = make_ac(tmp, "ucsi-source-psy-1", online=True, kind="USB")
-    plugin3 = Plugin()
+    plugin3 = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [usb])
     data = asyncio.run(plugin3.get_status())["data"]
     check("回退识别 USB-C 供电", data["ac_online"] is True, str(data.get("ac_online")))
 
     # Mains 节点存在时优先于 USB，且以 Mains 的状态为准。
     kernel_usb = make_ac(tmp, "ucsi-source-psy-2", online=True, kind="USB")
-    plugin4 = Plugin()
+    plugin4 = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [kernel_usb, ac])
     data = asyncio.run(plugin4.get_status())["data"]
     check("Mains 优先于 USB", data["ac_online"] is False, str(data.get("ac_online")))
@@ -686,7 +713,7 @@ def test_power_sign_and_ac_state():
     usb_a = make_ac(tmp, "ucsi-source-psy-A", online=False, kind="USB")
     usb_b = make_ac(tmp, "ucsi-source-psy-B", online=True, kind="USB")
     usb_c = make_ac(tmp, "ucsi-source-psy-C", online=False, kind="USB")
-    plugin5 = Plugin()
+    plugin5 = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [usb_a, usb_b, usb_c])
     data = asyncio.run(plugin5.get_status())["data"]
     check("多 USB 节点时有一个在线即为在线", data["ac_online"] is True, str(data.get("ac_online")))
@@ -697,7 +724,7 @@ def test_power_sign_and_ac_state():
     )
 
     # 整组都离线时仍要能报出"离线"，并退回第一个节点名供展示。
-    plugin6 = Plugin()
+    plugin6 = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [usb_a, usb_c])
     data = asyncio.run(plugin6.get_status())["data"]
     check("多 USB 节点全离线时判为离线", data["ac_online"] is False, str(data.get("ac_online")))
@@ -716,7 +743,7 @@ def test_fan_discovery():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-8-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, _temp = make_fan(tmp)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     data = asyncio.run(plugin.get_fan_status())["data"]
@@ -741,7 +768,7 @@ def test_fan_discovery():
     tmp2 = Path(tempfile.mkdtemp(prefix="f1pro-8b-"))
     battery2, kernel2 = make_battery(tmp2)
     hwmon2, ec2, _ = make_fan(tmp2, missing=("pwm1_enable",))
-    plugin2 = Plugin()
+    plugin2 = plugin_zh()
     install_fake_sysfs(tmp2, kernel2, [battery2], [], hwmon2, ec2)
     data2 = asyncio.run(plugin2.get_fan_status())["data"]
     check("缺 pwm1_enable 时判为不可用", data2["available"] is False, str(data2))
@@ -761,7 +788,7 @@ def test_fan_discovery():
     (plain / "capacity").write_text("50\n", encoding="utf-8")
     (plain / "status").write_text("Discharging\n", encoding="utf-8")
     hwmon3, ec3, _ = make_fan(tmp3)
-    plugin3 = Plugin()
+    plugin3 = plugin_zh()
     install_fake_sysfs(tmp3, FakeKernel(plain, [], None, None), [plain], [], hwmon3, ec3)
     data3 = asyncio.run(plugin3.get_fan_status())["data"]
     check(
@@ -787,7 +814,7 @@ def test_fan_curve_and_control():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-9-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp, temp_c=55.0, pwm=100)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     # ---- pwm1_enable 读回值的翻译（全插件唯一来源）----
@@ -877,7 +904,7 @@ def test_fan_curve_and_control():
     tmp_gate = Path(tempfile.mkdtemp(prefix="f1pro-9-gate-"))
     battery_gate, kernel_gate = make_battery(tmp_gate)
     hwmon_gate, ec_gate, temp_gate = make_fan(tmp_gate, temp_c=70.0, pwm=100)
-    plugin_gate = Plugin()
+    plugin_gate = plugin_zh()
     install_fake_sysfs(tmp_gate, kernel_gate, [battery_gate], [], hwmon_gate, ec_gate)
     reset_settings()
     asyncio.run(plugin_gate.set_fan_mode("balanced"))
@@ -997,7 +1024,7 @@ def test_fan_restore():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-10-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     # 模拟上次插件崩溃 / 被 kill -9：EC 停在手动 PWM，_unload 没跑过。
@@ -1059,7 +1086,7 @@ def test_fan_failure_rollback():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-11-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp, temp_c=60.0, pwm=100)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     check("前置：EC 处于自动控制", ec.mode_register == 0, str(ec.mode_register))
@@ -1117,7 +1144,7 @@ def test_fan_safety_paths():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-12a-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp, temp_c=60.0, pwm=100)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     asyncio.run(plugin.set_fan_mode("balanced"))
@@ -1150,7 +1177,7 @@ def test_fan_safety_paths():
     tmp_b = Path(tempfile.mkdtemp(prefix="f1pro-12b-"))
     battery_b, kernel_b = make_battery(tmp_b)
     hwmon_b, ec_b, temp_b = make_fan(tmp_b, temp_c=60.0, pwm=100)
-    plugin_b = Plugin()
+    plugin_b = plugin_zh()
     install_fake_sysfs(tmp_b, kernel_b, [battery_b], [], hwmon_b, ec_b)
     asyncio.run(plugin_b.set_fan_mode("balanced"))
     plugin_b._stop_fan_controller()
@@ -1176,7 +1203,7 @@ def test_fan_safety_paths():
     tmp2 = Path(tempfile.mkdtemp(prefix="f1pro-12c-"))
     battery2, kernel2 = make_battery(tmp2)
     hwmon2, ec2, temp2 = make_fan(tmp2, temp_c=60.0, pwm=100)
-    plugin2 = Plugin()
+    plugin2 = plugin_zh()
     install_fake_sysfs(tmp2, kernel2, [battery2], [], hwmon2, ec2)
 
     plugin2._update_setting("fan_mode", "balanced")
@@ -1245,7 +1272,7 @@ def test_fan_safety_paths():
     tmp2b = Path(tempfile.mkdtemp(prefix="f1pro-12c2-"))
     battery2b, kernel2b = make_battery(tmp2b)
     hwmon2b, ec2b, temp2b = make_fan(tmp2b, temp_c=60.0, pwm=100)
-    plugin2b = Plugin()
+    plugin2b = plugin_zh()
     install_fake_sysfs(tmp2b, kernel2b, [battery2b], [], hwmon2b, ec2b)
 
     # 直接手工构造"寄存器在手动、读回文件却说自动"这种不一致：
@@ -1288,7 +1315,7 @@ def test_fan_safety_paths():
     tmp3 = Path(tempfile.mkdtemp(prefix="f1pro-12d-"))
     battery3, kernel3 = make_battery(tmp3)
     hwmon3, ec3, temp3 = make_fan(tmp3, temp_c=60.0, pwm=100)
-    plugin3 = Plugin()
+    plugin3 = plugin_zh()
     install_fake_sysfs(tmp3, kernel3, [battery3], [], hwmon3, ec3)
 
     asyncio.run(plugin3.set_fan_mode("balanced"))
@@ -1318,7 +1345,7 @@ def test_fan_safety_overrides_deadband():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-13-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp, temp_c=70.0, pwm=100)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     # 使用一条在安全温度附近非常平缓的曲线：[80, 250] → [90, 255]。
@@ -1406,7 +1433,7 @@ def test_fan_handover_gate_and_no_early_exit():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-14a-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp, temp_c=60.0, pwm=100)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     ec.mode_register = 1  # 制造一个"残留手动"的现场，好让下面的"没写"有分辨力
@@ -1433,7 +1460,7 @@ def test_fan_handover_gate_and_no_early_exit():
     tmp_b = Path(tempfile.mkdtemp(prefix="f1pro-14b-"))
     battery_b, kernel_b = make_battery(tmp_b)
     hwmon_b, ec_b, _ = make_fan(tmp_b, temp_c=60.0, pwm=100)
-    plugin_b = Plugin()
+    plugin_b = plugin_zh()
     install_fake_sysfs(tmp_b, kernel_b, [battery_b], [], hwmon_b, ec_b)
 
     ec_b.mode_register = 1
@@ -1457,7 +1484,7 @@ def test_fan_handover_gate_and_no_early_exit():
     tmp2 = Path(tempfile.mkdtemp(prefix="f1pro-14c-"))
     battery2, kernel2 = make_battery(tmp2)
     hwmon2, ec2, _ = make_fan(tmp2, temp_c=55.0, pwm=110)
-    plugin2 = Plugin()
+    plugin2 = plugin_zh()
     install_fake_sysfs(tmp2, kernel2, [battery2], [], hwmon2, ec2)
     plugin2._update_setting("fan_mode", "auto")
 
@@ -1482,7 +1509,7 @@ def test_fan_handover_gate_and_no_early_exit():
     tmp3 = Path(tempfile.mkdtemp(prefix="f1pro-14d-"))
     battery3, kernel3 = make_battery(tmp3)
     hwmon3, ec3, _ = make_fan(tmp3, temp_c=55.0, pwm=120)
-    plugin3 = Plugin()
+    plugin3 = plugin_zh()
     install_fake_sysfs(tmp3, kernel3, [battery3], [], hwmon3, ec3)
     plugin3._update_setting("fan_mode", "auto")
 
@@ -1520,7 +1547,7 @@ def test_fan_handover_gate_and_no_early_exit():
     tmp4 = Path(tempfile.mkdtemp(prefix="f1pro-14e-"))
     battery4, kernel4 = make_battery(tmp4)
     hwmon4, ec4, _ = make_fan(tmp4, temp_c=55.0, pwm=120)
-    plugin4 = Plugin()
+    plugin4 = plugin_zh()
     install_fake_sysfs(tmp4, kernel4, [battery4], [], hwmon4, ec4)
     plugin4._update_setting("fan_mode", "auto")
 
@@ -1576,7 +1603,7 @@ def test_fan_unconfirmed_control_paths():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-15a-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp, temp_c=65.0, pwm=100)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     asyncio.run(plugin.set_fan_mode("balanced"))
@@ -1638,7 +1665,7 @@ def test_fan_unconfirmed_control_paths():
     tmp_b = Path(tempfile.mkdtemp(prefix="f1pro-15b-"))
     battery_b, kernel_b = make_battery(tmp_b)
     hwmon_b, ec_b, temp_b = make_fan(tmp_b, temp_c=55.0, pwm=100)
-    plugin_b = Plugin()
+    plugin_b = plugin_zh()
     install_fake_sysfs(tmp_b, kernel_b, [battery_b], [], hwmon_b, ec_b)
 
     # 造一条 55°C 恰好给 115 的曲线，把目标钉死在 115。
@@ -1731,7 +1758,7 @@ def test_fan_transition_serialization():
     tmp = Path(tempfile.mkdtemp(prefix="f1pro-16a-"))
     battery, kernel = make_battery(tmp)
     hwmon, ec, temp_dir = make_fan(tmp, temp_c=65.0, pwm=100)
-    plugin = Plugin()
+    plugin = plugin_zh()
     install_fake_sysfs(tmp, kernel, [battery], [], hwmon, ec)
 
     # 记下所有 sysfs 写入的先后顺序，这是判断"是否穿插"的唯一可靠依据。
@@ -1863,7 +1890,7 @@ def test_fan_transition_serialization():
         tmp_r = Path(tempfile.mkdtemp(prefix=f"f1pro-16a-r{round_index}-"))
         battery_r, kernel_r = make_battery(tmp_r)
         hwmon_r, ec_r, temp_r = make_fan(tmp_r, temp_c=65.0, pwm=100 + round_index)
-        plugin_r = Plugin()
+        plugin_r = plugin_zh()
         install_fake_sysfs(tmp_r, kernel_r, [battery_r], [], hwmon_r, ec_r)
 
         at_gate_r = threading.Barrier(2, timeout=10)
@@ -1922,7 +1949,7 @@ def test_fan_transition_serialization():
     tmp_ok = Path(tempfile.mkdtemp(prefix="f1pro-16a2-"))
     battery_ok, kernel_ok = make_battery(tmp_ok)
     hwmon_ok, ec_ok, temp_ok = make_fan(tmp_ok, temp_c=65.0, pwm=100)
-    plugin_ok = Plugin()
+    plugin_ok = plugin_zh()
     install_fake_sysfs(tmp_ok, kernel_ok, [battery_ok], [], hwmon_ok, ec_ok)
 
     rpc_manual = plugin_ok._set_fan_mode_sync("balanced")
@@ -1942,7 +1969,7 @@ def test_fan_transition_serialization():
     tmp_b = Path(tempfile.mkdtemp(prefix="f1pro-16b-"))
     battery_b, kernel_b = make_battery(tmp_b)
     hwmon_b, ec_b, temp_b = make_fan(tmp_b, temp_c=65.0, pwm=100)
-    plugin_b = Plugin()
+    plugin_b = plugin_zh()
     install_fake_sysfs(tmp_b, kernel_b, [battery_b], [], hwmon_b, ec_b)
 
     # 造一个"忽略 stop_event、迟迟不退出"的控制线程，
@@ -2754,7 +2781,8 @@ def test_log_prefix_branding():
     # 等于给"逐个漏改"留了后门。改成精确计数后，少一处就红。
     #
     # 注意：改日志条数时**必须同步改这里的期望值**，否则会误报。
-    EXPECTED_MAIN_PREFIX = 5
+    # 5 → 6：v0.6.12 新增 `set_locale` RPC，它记一行"界面语言设为 …"。
+    EXPECTED_MAIN_PREFIX = 6
     new_hits = occurrences("F1Pro EC Control:")
     check(
         f"main.py 里新日志前缀「F1Pro EC Control:」出现 {EXPECTED_MAIN_PREFIX} 次",
@@ -2782,6 +2810,93 @@ def test_log_prefix_branding():
     )
 
 
+def test_i18n():
+    """18. 双语文案：两表键集一致、占位符一致、切换真的生效、缺键不崩。"""
+    section("18. 后端双语文案（i18n）")
+
+    zh, en = Plugin._MSG["zh"], Plugin._MSG["en"]
+
+    # 键集必须**完全一致**：任何一边多一条，另一边漏译都该在测试里暴露，
+    # 否则漏掉的那条会在界面上显示成英文（或键名），而没人会注意到。
+    check("中英两表键集完全一致", set(zh) == set(en), f"zh-en={set(zh)-set(en)} en-zh={set(en)-set(zh)}")
+    check("两表都非空", len(zh) > 0 and len(en) > 0, f"zh={len(zh)} en={len(en)}")
+
+    # 占位符必须一一对应：中文写了 `{label}` 而英文写成 `{name}`，
+    # `.format()` 会抛 KeyError、被 `_t` 吞掉后**原样吐出带花括号的模板**，
+    # 用户会看到 `{label}` 这种字面量。离线就能拦住。
+    placeholder_mismatch = []
+    for key in sorted(set(zh) & set(en)):
+        pz = set(re.findall(r"\{(\w+)\}", zh[key]))
+        pe = set(re.findall(r"\{(\w+)\}", en[key]))
+        if pz != pe:
+            placeholder_mismatch.append((key, sorted(pz), sorted(pe)))
+    check("中英两表占位符一一对应", placeholder_mismatch == [], str(placeholder_mismatch))
+
+    # 英文表里不该出现中日韩字符（漏译的典型征兆：直接抄了中文那一行）。
+    # 允许 `％` 这类全角符号之外的例外极少，这里只查汉字/假名。
+    cjk_in_en = [
+        k for k, v in en.items() if re.search(r"[\u4e00-\u9fff\u3040-\u30ff]", v)
+    ]
+    check("英文表里没有残留汉字", cjk_in_en == [], str(cjk_in_en))
+
+    # ---- 翻译行为 ----
+    plugin = plugin_en()
+    check("默认（英文）取到英文文案", plugin._t("mode.auto") == en["mode.auto"], plugin._t("mode.auto"))
+    plugin = plugin_zh()
+    check("切中文后取到中文文案", plugin._t("mode.auto") == zh["mode.auto"], plugin._t("mode.auto"))
+
+    # 占位符替换
+    check(
+        "参数被真正替换进模板",
+        plugin._t("err.thresholdAdjusted", actual=90, value=80)
+        == zh["err.thresholdAdjusted"].format(actual=90, value=80),
+        plugin._t("err.thresholdAdjusted", actual=90, value=80),
+    )
+
+    # 缺键 → 返回键名本身（而不是空串或抛异常），界面上一眼能看出漏了哪条。
+    check("缺键返回键名本身", plugin._t("no.such.key.at.all") == "no.such.key.at.all", plugin._t("no.such.key.at.all"))
+    # 参数缺失不该抛异常（宁可留着花括号也不要让整个 RPC 挂掉）。
+    missing_arg = plugin._t("err.thresholdAdjusted")
+    check("参数缺失时不抛异常", isinstance(missing_arg, str) and len(missing_arg) > 0, missing_arg)
+
+    # ---- set_locale：只认 zh 前缀，其余一律 en ----
+    plugin_a = Plugin()
+    asyncio.run(plugin_a.set_locale("zh-CN"))
+    check("set_locale('zh-CN') → zh", Plugin._lang == "zh", Plugin._lang)
+    asyncio.run(plugin_a.set_locale("en-US"))
+    check("set_locale('en-US') → en", Plugin._lang == "en", Plugin._lang)
+    asyncio.run(plugin_a.set_locale("fr"))
+    check("未知语言一律落回 en", Plugin._lang == "en", Plugin._lang)
+    asyncio.run(plugin_a.set_locale("TCHINESE"))
+    check("大小写不敏感（tchinese → zh）", Plugin._lang == "zh", Plugin._lang)
+
+    # `set_locale` 必须写**类属性**，否则 `@classmethod` 的 `_t_static` 读不到
+    # （曲线校验的报错会顽固留在英文，离线已复现）。
+    Plugin._lang = "en"
+    plugin_b = Plugin()
+    asyncio.run(plugin_b.set_locale("zh"))
+    check(
+        "set_locale 写的是类属性（classmethod 也看得到）",
+        "_lang" not in plugin_b.__dict__ and Plugin._t_static("mode.auto") == zh["mode.auto"],
+        f"instance_dict={'_lang' in plugin_b.__dict__} static={Plugin._t_static('mode.auto')}",
+    )
+
+    # ---- `_t_static` 未定义时 `_normalize_fan_curve` 会 AttributeError ----
+    # 这是一条**真实缺陷的回归守卫**：曲线校验在 classmethod 里取文案，
+    # 而它过去只能通过 `self._t`，一旦忘了给类方法留入口就会崩。
+    bad = None
+    try:
+        Plugin._normalize_fan_curve([[60, 50], [60, 80], [70, 120], [80, 180], [90, 240]])
+    except ValueError as exc:
+        bad = str(exc)
+    except AttributeError as exc:
+        bad = f"AttributeError: {exc}"
+    check("曲线校验在 classmethod 里也能取到本地化文案", bad is not None and "递增" in bad, str(bad))
+
+    # 恢复语言，避免污染后续场景（不同测试共享 Plugin 类）。
+    Plugin._lang = "en"
+
+
 def main():
     tests = [
         test_status_and_modes,
@@ -2803,6 +2918,7 @@ def main():
         test_fan_unload_and_start_failure,
         test_fan_unload_cancels_rpc_and_curve_start_failure,
         test_log_prefix_branding,
+        test_i18n,
     ]
     for test in tests:
         test()
