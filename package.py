@@ -45,10 +45,15 @@ EXCLUDE_DIRS = {
     "tests",
     ".mut",
     "assets",
+    # 版本库与开发向源码目录：**绝不能进发布包**
+    # （.git 尤其危险：一旦入库会把全部对象塞进 ZIP，体积暴涨且泄露历史）
+    ".git",
+    "scripts",
+    "src",
 }
 EXCLUDE_SUFFIX = (".pyc", ".orig", ".gitignore")
 # 单文件排除：本脚本是开发工具（校验 + 打包），掌机用不到，不必进安装包。
-EXCLUDE_FILES = {"package.py"}
+EXCLUDE_FILES = {"package.py", "CONTRIBUTING.md"}
 
 # 参与「过时建议」扫描的文本文件（发布包内）
 TEXT_FILES = [
@@ -251,6 +256,23 @@ def main() -> int:
         tops = {n.split("/", 1)[0] for n in names}
         print("  顶层目录:", tops)
     c.check("zip 顶层只有插件文件夹一个", tops == {PLUGIN_DIR.name}, str(tops))
+    # **防回归**：发布包里绝不能出现版本库或开发向文件/目录。
+    # 踩过一次：`git init` 之后包内混进 83 个 `.git/` 条目，ZIP 从 88 KB 涨到 614 KB
+    # 且把完整历史泄露出去。这里对包内每一条路径做独立断言，不靠"排除清单写没写对"。
+    forbidden_dirs = (".git", "tests", "src", "scripts", "assets", "node_modules", ".mut", "__pycache__")
+    forbidden_files = ("package.py", "CONTRIBUTING.md", ".gitignore")
+    bad = []
+    for n in names:
+        parts = n.split("/")[1:]  # 去掉顶层插件目录
+        if any(p in forbidden_dirs for p in parts):
+            bad.append(n)
+        elif parts and parts[-1] in forbidden_files:
+            bad.append(n)
+    c.check(
+        "发布包内不含 .git / tests / src / scripts / 开发工具",
+        not bad,
+        f"多出：{bad[:6]}" if bad else "",
+    )
     print(f"  大小: {zip_name.stat().st_size} 字节")
     print(f"  版本: {version}")
 
